@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Radiation and Space-Weather Monitor | Aerospace Telemetry Dashboard</title>
+    
+    <!-- Google Fonts: Inter & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    
+    <!-- Chart.js CDN with SRI fallback -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="dark-theme">
+
+    <!-- Mobile Navigation Drawer Overlay -->
+    <div id="drawerOverlay" class="drawer-overlay"></div>
+
+    <div class="app-layout">
+        
+        <!-- SIDEBAR NAVIGATION -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="brand-icon">
+                    <!-- Aerospace Satellite / Radar SVG Icon -->
+                    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3" stroke="#22d3ee" fill="#0891b2" fill-opacity="0.3"></circle>
+                        <path d="M12 2a10 10 0 0 1 10 10" stroke="#06b6d4" stroke-dasharray="2 2"></path>
+                        <path d="M12 5a7 7 0 0 1 7 7" stroke="#38bdf8"></path>
+                        <path d="M12 8a4 4 0 0 1 4 4" stroke="#818cf8"></path>
+                        <path d="M2 12a10 10 0 0 1 10-10" stroke="#06b6d4" stroke-dasharray="2 2"></path>
+                        <line x1="12" y1="12" x2="20" y2="20" stroke="#a855f7" stroke-width="2.5"></line>
+                        <circle cx="20" cy="20" r="1.5" fill="#f43f5e"></circle>
+                    </svg>
+                </div>
+                <div class="brand-text">
+                    <span class="brand-title">AERO-MONITOR</span>
+                    <span class="brand-subtitle">Aerospace Hackathon 2026</span>
+                </div>
+                <button class="btn-icon drawer-close-btn" id="drawerCloseBtn" aria-label="Close Menu">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"></path></svg>
+                </button>
+            </div>
+
+            <nav class="sidebar-nav">
+                <a href="#overview" class="nav-link active" data-section="overview">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+                    <span>System Overview</span>
+                </a>
+                <a href="#radiation-trends" class="nav-link" data-section="radiation-trends">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"></circle><path d="M12 3v9M12 12l6 6M12 12l-6 6"></path></svg>
+                    <span>Radiation Trends</span>
+                </a>
+                <a href="#geomagnetic" class="nav-link" data-section="geomagnetic">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a8 8 0 0 0-8 8c0 5 8 12 8 12s8-7 8-12a8 8 0 0 0-8-8z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+                    <span>Geomagnetic Activity</span>
+                </a>
+                <a href="#health-diagnostics" class="nav-link" data-section="health-diagnostics">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+                    <span>Electronics Health</span>
+                </a>
+                <a href="#alerts-section" class="nav-link" data-section="alerts-section">
+                    <div class="nav-link-badge-wrapper">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                        <span>Alert History</span>
+                        <span id="navAlertBadge" class="nav-badge alert-count-badge">0</span>
+                    </div>
+                </a>
+                <a href="#telemetry-table" class="nav-link" data-section="telemetry-table">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+                    <span>Historical Log</span>
+                </a>
+                <a href="#esp32-modal-btn" class="nav-link" id="navEsp32Link">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
+                    <span>ESP32 Hardware Guide</span>
+                </a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="station-meta">
+                    <div class="meta-line"><span class="meta-label">Station ID:</span> <span id="sidebarStationId">RSWM-STATION-01</span></div>
+                    <div class="meta-line"><span class="meta-label">Payload:</span> Alpha Sensor Suite</div>
+                    <div class="meta-line"><span class="meta-label">DB Engine:</span> SQLite WAL</div>
+                </div>
+                <div class="demo-tag-container">
+                    <span class="badge-demo-inline">SIMULATED / DEMO MODE</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- MAIN VIEWPORT -->
+        <div class="main-viewport">
+            
+            <!-- TOP APP BAR -->
+            <header class="topbar">
+                <div class="topbar-left">
+                    <button class="menu-toggle-btn" id="mobileMenuBtn" aria-label="Toggle Navigation">
+                        <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+                    </button>
+                    <div>
+                        <h1 class="project-title">Radiation and Space-Weather Monitor</h1>
+                        <p class="project-subtitle">Aerospace Hackathon 2026 • Ground Telemetry & Flight Payload Monitor</p>
+                    </div>
+                </div>
+
+                <div class="topbar-right">
+                    <!-- Prominent Demo Mode Alert Badge -->
+                    <div class="mode-pill-badge" id="modePill" title="Demo OFF by default — click Start Demo to begin simulation">
+                        <span class="pulsing-dot warning"></span>
+                        <span id="modeText">STANDBY</span>
+                    </div>
+
+                    <!-- Connection Status Badge -->
+                    <div class="status-pill-badge" id="connectionPill">
+                        <span class="pulsing-dot warning" id="connDot"></span>
+                        <span id="connStatusText">IDLE / AWAITING DATA</span>
+                    </div>
+
+                    <!-- Live Clocks -->
+                    <div class="clock-display" title="Synchronized Ground Station Clocks">
+                        <div class="clock-row">
+                            <span class="clock-label">UTC:</span>
+                            <span class="clock-value" id="utcClock">--:--:-- UTC</span>
+                        </div>
+                        <div class="clock-row">
+                            <span class="clock-label">LOCAL:</span>
+                            <span class="clock-value" id="localClock">--:--:--</span>
+                        </div>
+                    </div>
+                </div>
+            </header>
+
+            <!-- ACTION & CONTROL TOOLBAR -->
+            <section class="control-toolbar">
+                <div class="toolbar-left">
+                    <span class="toolbar-label">Demo Telemetry Engine:</span>
+                    <button class="btn btn-sm btn-primary" id="btnToggleDemo">
+                        <span id="demoBtnIcon">▶</span>
+                        <span id="demoBtnText">Start Demo</span>
+                    </button>
+                    <button class="btn btn-sm btn-secondary" id="btnInjectFlare" title="Inject an anomalous radiation spike and magnetic storm">
+                        ⚡ Simulate Solar Flare
+                    </button>
+                    <button class="btn btn-sm btn-secondary" id="btnInjectSag" title="Inject a sudden power rail voltage drop">
+                        📉 Simulate Voltage Drop
+                    </button>
+                </div>
+                <div class="toolbar-right">
+                    <span class="last-packet-label">Last Packet: <span id="lastPacketTime">Awaiting sync...</span></span>
+                    <button class="btn btn-sm btn-outline" id="btnExportCsv" title="Export recorded sensor telemetry to CSV">
+                        📥 Export CSV
+                    </button>
+                    <button class="btn btn-sm btn-outline" id="btnOpenThresholds" title="View demo safety limits">
+                        ⚙️ Thresholds
+                    </button>
+                </div>
+            </section>
+
+            <!-- LIVE SUDDEN SPIKE NOTIFICATION BANNER (Triggered dynamically) -->
+            <div id="spikeAlertBanner" class="spike-alert-banner hidden">
+                <div class="banner-content">
+                    <span class="banner-icon">⚠️</span>
+                    <div class="banner-text">
+                        <strong id="bannerTitle">SUDDEN SPIKE DETECTED</strong>
+                        <span id="bannerMessage">Sensor anomaly registered.</span>
+                    </div>
+                </div>
+                <button class="btn-banner-close" id="bannerCloseBtn">✕</button>
+            </div>
+
+            <!-- SCROLLABLE DASHBOARD CONTENT -->
+            <main class="dashboard-body" id="overview">
+
+                <!-- 1. FIVE MAIN SENSOR METRIC CARDS -->
+                <section class="metrics-grid">
+                    
+                    <!-- SENSOR 1: RADIATION -->
+                    <div class="metric-card" id="card-radiation">
+                        <div class="card-header">
+                            <div class="sensor-title-group">
+                                <span class="sensor-icon radiation-icon">☢️</span>
+                                <div>
+                                    <h3 class="sensor-name">Radiation Level</h3>
+                                    <span class="sensor-tag">Ionizing Particle Flux</span>
+                                </div>
+                            </div>
+                            <span class="status-badge normal" id="badge-radiation">NORMAL</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="reading-value-row">
+                                <span class="metric-value" id="val-radiation">--</span>
+                                <span class="metric-unit">µSv/h</span>
+                            </div>
+                            <div class="reading-subtext">
+                                <span class="trend-indicator neutral" id="trend-radiation">-- µSv/h</span>
+                                <span class="demo-data-label">DEMO DATA</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <div class="threshold-bar-container">
+                                <div class="threshold-bar-fill" id="fill-radiation" style="width: 15%;"></div>
+                            </div>
+                            <div class="threshold-labels">
+                                <span>Nominal &lt; 0.50</span>
+                                <span>Crit &gt; 2.50 µSv/h</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- SENSOR 2: TEMPERATURE -->
+                    <div class="metric-card" id="card-temperature">
+                        <div class="card-header">
+                            <div class="sensor-title-group">
+                                <span class="sensor-icon temp-icon">🌡️</span>
+                                <div>
+                                    <h3 class="sensor-name">Subsystem Temp</h3>
+                                    <span class="sensor-tag">Avionics & Sensing Bay</span>
+                                </div>
+                            </div>
+                            <span class="status-badge normal" id="badge-temperature">NORMAL</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="reading-value-row">
+                                <span class="metric-value" id="val-temperature">--</span>
+                                <span class="metric-unit">°C</span>
+                            </div>
+                            <div class="reading-subtext">
+                                <span class="trend-indicator neutral" id="trend-temperature">-- °C</span>
+                                <span class="demo-data-label">DEMO DATA</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <div class="threshold-bar-container">
+                                <div class="threshold-bar-fill" id="fill-temperature" style="width: 35%;"></div>
+                            </div>
+                            <div class="threshold-labels">
+                                <span>Nominal 15 - 40°C</span>
+                                <span>Crit &gt; 60°C</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- SENSOR 3: VOLTAGE -->
+                    <div class="metric-card" id="card-voltage">
+                        <div class="card-header">
+                            <div class="sensor-title-group">
+                                <span class="sensor-icon volt-icon">⚡</span>
+                                <div>
+                                    <h3 class="sensor-name">Bus Voltage</h3>
+                                    <span class="sensor-tag">3.3V Power Rail</span>
+                                </div>
+                            </div>
+                            <span class="status-badge normal" id="badge-voltage">NORMAL</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="reading-value-row">
+                                <span class="metric-value" id="val-voltage">--</span>
+                                <span class="metric-unit">V</span>
+                            </div>
+                            <div class="reading-subtext">
+                                <span class="trend-indicator neutral" id="trend-voltage">-- V</span>
+                                <span class="demo-data-label">DEMO DATA</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <div class="threshold-bar-container">
+                                <div class="threshold-bar-fill" id="fill-voltage" style="width: 50%;"></div>
+                            </div>
+                            <div class="threshold-labels">
+                                <span>Nominal 3.1 - 3.5 V</span>
+                                <span>Rail Sag &lt; 2.9 V</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- SENSOR 4: CURRENT -->
+                    <div class="metric-card" id="card-current">
+                        <div class="card-header">
+                            <div class="sensor-title-group">
+                                <span class="sensor-icon curr-icon">🔋</span>
+                                <div>
+                                    <h3 class="sensor-name">Current Draw</h3>
+                                    <span class="sensor-tag">Payload Circuit Consumption</span>
+                                </div>
+                            </div>
+                            <span class="status-badge normal" id="badge-current">NORMAL</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="reading-value-row">
+                                <span class="metric-value" id="val-current">--</span>
+                                <span class="metric-unit">A</span>
+                            </div>
+                            <div class="reading-subtext">
+                                <span class="trend-indicator neutral" id="trend-current">-- A</span>
+                                <span class="demo-data-label">DEMO DATA</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <div class="threshold-bar-container">
+                                <div class="threshold-bar-fill" id="fill-current" style="width: 28%;"></div>
+                            </div>
+                            <div class="threshold-labels">
+                                <span>Nominal 0.05 - 0.35 A</span>
+                                <span>Overload &gt; 0.55 A</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- SENSOR 5: MAGNETIC FIELD -->
+                    <div class="metric-card" id="card-magnetic">
+                        <div class="card-header">
+                            <div class="sensor-title-group">
+                                <span class="sensor-icon mag-icon">🧲</span>
+                                <div>
+                                    <h3 class="sensor-name">Geomagnetic Field</h3>
+                                    <span class="sensor-tag">Flux Density Vector</span>
+                                </div>
+                            </div>
+                            <span class="status-badge normal" id="badge-magnetic">NORMAL</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="reading-value-row">
+                                <span class="metric-value" id="val-magnetic">--</span>
+                                <span class="metric-unit">µT</span>
+                            </div>
+                            <div class="reading-subtext">
+                                <span class="trend-indicator neutral" id="trend-magnetic">-- µT</span>
+                                <span class="demo-data-label">DEMO DATA</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <div class="threshold-bar-container">
+                                <div class="threshold-bar-fill" id="fill-magnetic" style="width: 48%;"></div>
+                            </div>
+                            <div class="threshold-labels">
+                                <span>Nominal 25 - 65 µT</span>
+                                <span>Storm Disturbance &gt; 85 µT</span>
+                            </div>
+                        </div>
+                    </div>
+
+                </section>
+
+                <!-- 2. HEALTH & RISK ASSESSMENT + GEOMAGNETIC ILLUSTRATION ROW -->
+                <section class="diagnostic-row" id="health-diagnostics">
+                    
+                    <!-- ELECTRONICS HEALTH / RISK INDICATOR -->
+                    <div class="card health-card">
+                        <div class="card-header">
+                            <div>
+                                <h3 class="card-title">Overall Electronics Health & Risk Indicator</h3>
+                                <p class="card-subtitle">Real-time Subsystem Risk Score & Hazard Heuristic</p>
+                            </div>
+                            <span class="status-badge normal" id="healthRiskBadge">NORMAL</span>
+                        </div>
+                        <div class="health-card-body">
+                            <div class="radial-score-wrapper">
+                                <div class="radial-ring" id="radialRing">
+                                    <span class="score-number" id="healthScoreVal">100</span>
+                                    <span class="score-percent">%</span>
+                                    <span class="score-caption">SUBSYSTEM HEALTH</span>
+                                </div>
+                            </div>
+                            <div class="health-details">
+                                <div class="health-status-header">
+                                    <span class="health-status-title" id="healthStatusTitle">OPTIMAL NOMINAL OPERATION</span>
+                                    <p class="health-status-desc" id="healthStatusDesc">All telemetry parameters reside within normal operating envelopes.</p>
+                                </div>
+                                <div class="health-reasons-box">
+                                    <span class="reasons-heading">Diagnostic Factor Breakdown:</span>
+                                    <ul class="reasons-list" id="healthReasonsList">
+                                        <li>Telemetry bus initialized in nominal status.</li>
+                                    </ul>
+                                </div>
+                                <div class="disclaimer-callout">
+                                    <strong>DEMO SCORE NOTICE:</strong> Transparent heuristic calculated for simulated subsystem health. Never use as a certified aerospace flight safety assessment.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- GEOMAGNETIC ACTIVITY ILLUSTRATION & KP-INDEX WIDGET -->
+                    <div class="card geomagnetic-card" id="geomagnetic">
+                        <div class="card-header">
+                            <div>
+                                <h3 class="card-title">Geomagnetic Activity & Solar Wind</h3>
+                                <p class="card-subtitle">Magnetosphere Compression & Planetary Kp Index</p>
+                            </div>
+                            <span class="badge-illustrative">ILLUSTRATIVE ONLY</span>
+                        </div>
+                        <div class="geomagnetic-body">
+                            <!-- Custom Aerospace SVG Magnetosphere Graphic -->
+                            <div class="svg-diagram-wrapper">
+                                <svg viewBox="0 0 420 180" class="magnetosphere-svg" xmlns="http://www.w3.org/2000/svg">
+                                    <defs>
+                                        <radialGradient id="earthGrad" cx="50%" cy="50%" r="50%">
+                                            <stop offset="0%" stop-color="#38bdf8"/>
+                                            <stop offset="70%" stop-color="#0284c7"/>
+                                            <stop offset="100%" stop-color="#0f172a"/>
+                                        </radialGradient>
+                                        <linearGradient id="solarWindGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                            <stop offset="0%" stop-color="#f59e0b" stop-opacity="0.8"/>
+                                            <stop offset="70%" stop-color="#22d3ee" stop-opacity="0.4"/>
+                                            <stop offset="100%" stop-color="#3b82f6" stop-opacity="0.0"/>
+                                        </linearGradient>
+                                        <linearGradient id="bowShockGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                            <stop offset="0%" stop-color="#ef4444" stop-opacity="0.8"/>
+                                            <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0.1"/>
+                                        </linearGradient>
+                                    </defs>
+
+                                    <!-- Solar Wind Particle Arrows -->
+                                    <g class="solar-wind-particles">
+                                        <line x1="10" y1="35" x2="130" y2="35" stroke="url(#solarWindGrad)" stroke-width="2" stroke-dasharray="8 6"/>
+                                        <line x1="10" y1="65" x2="120" y2="65" stroke="url(#solarWindGrad)" stroke-width="2.5" stroke-dasharray="10 5"/>
+                                        <line x1="10" y1="95" x2="115" y2="95" stroke="url(#solarWindGrad)" stroke-width="3" stroke-dasharray="12 4"/>
+                                        <line x1="10" y1="125" x2="120" y2="125" stroke="url(#solarWindGrad)" stroke-width="2.5" stroke-dasharray="10 5"/>
+                                        <line x1="10" y1="155" x2="130" y2="155" stroke="url(#solarWindGrad)" stroke-width="2" stroke-dasharray="8 6"/>
+                                    </g>
+                                    <text x="25" y="22" fill="#f59e0b" font-size="10" font-family="'JetBrains Mono', monospace">SOLAR WIND ➔</text>
+
+                                    <!-- Bow Shock Arc -->
+                                    <path d="M 130 15 Q 165 90 130 165" fill="none" stroke="url(#bowShockGrad)" stroke-width="3.5" stroke-linecap="round"/>
+                                    <text x="100" y="175" fill="#f87171" font-size="9" font-family="'JetBrains Mono', monospace">BOW SHOCK</text>
+
+                                    <!-- Magnetopause & Magnetic Field Lines -->
+                                    <path d="M 230 40 C 160 40 160 140 230 140 C 350 140 390 105 410 100" fill="none" stroke="#22d3ee" stroke-width="1.5" stroke-opacity="0.6"/>
+                                    <path d="M 230 60 C 180 60 180 120 230 120 C 330 120 370 95 410 93" fill="none" stroke="#818cf8" stroke-width="1.2" stroke-opacity="0.7"/>
+                                    <path d="M 230 20 C 140 20 140 160 230 160 C 380 160 400 115 415 110" fill="none" stroke="#06b6d4" stroke-width="1.2" stroke-dasharray="4 3" stroke-opacity="0.4"/>
+
+                                    <!-- Earth Sphere -->
+                                    <circle cx="230" cy="90" r="24" fill="url(#earthGrad)" stroke="#38bdf8" stroke-width="1.5"/>
+                                    <circle cx="230" cy="90" r="27" fill="none" stroke="#22d3ee" stroke-width="1" stroke-opacity="0.4" stroke-dasharray="2 3"/>
+                                    
+                                    <!-- Satellite Orbital Path & Indicator -->
+                                    <ellipse cx="230" cy="90" rx="48" ry="42" fill="none" stroke="#a855f7" stroke-width="1" stroke-dasharray="3 4"/>
+                                    <circle cx="270" cy="70" r="3" fill="#22d3ee"/>
+                                    <text x="278" y="72" fill="#22d3ee" font-size="8" font-family="'JetBrains Mono', monospace">STATION / PAYLOAD</text>
+
+                                    <!-- Earth Axis -->
+                                    <line x1="230" y1="60" x2="230" y2="120" stroke="#f1f5f9" stroke-width="1.2" stroke-dasharray="2 2" stroke-opacity="0.7"/>
+                                    <text x="215" y="93" fill="#ffffff" font-size="9" font-weight="bold" font-family="'Inter', sans-serif">GEO</text>
+                                </svg>
+                            </div>
+
+                            <!-- Planetary Kp Index Visual Meter -->
+                            <div class="kp-index-container">
+                                <div class="kp-header">
+                                    <span class="kp-label">Simulated Planetary Kp Index:</span>
+                                    <span class="kp-val-badge quiet" id="kpBadge">Kp 1.8 (Quiet)</span>
+                                </div>
+                                <div class="kp-meter-bar">
+                                    <div class="kp-segment s-green" title="0-1: Quiet">0-2</div>
+                                    <div class="kp-segment s-green" title="2-3: Unsettled">3</div>
+                                    <div class="kp-segment s-yellow" title="4: Active">4</div>
+                                    <div class="kp-segment s-orange" title="5: Minor Storm">5</div>
+                                    <div class="kp-segment s-red" title="6-9: Severe Storm">6-9</div>
+                                    <div class="kp-needle" id="kpNeedle" style="left: 20%;"></div>
+                                </div>
+                                <p class="kp-caption">Simulated geomagnetic storm scale computed from sensor magnetic flux delta.</p>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 3. RADIATION ANALYSIS — THREE SEPARATE GRAPHS + TWO TABLES -->
+                <section id="radiation-trends">
+
+                    <!-- Graph A: Raw ADC Readings -->
+                    <div class="card chart-card-large" style="margin-bottom:1rem;">
+                        <div class="card-header chart-header-row">
+                            <div>
+                                <h3 class="card-title">Graph A — Raw ADC Readings (µSv/h)</h3>
+                                <p class="card-subtitle">Individual radiation sensor ADC samples with normal &amp; critical threshold overlays</p>
+                            </div>
+                            <div class="chart-controls">
+                                <span class="chart-legend-pill pill-normal">Normal &lt; 0.50</span>
+                                <span class="chart-legend-pill pill-warning">Elevated 0.50 – 2.50</span>
+                                <span class="chart-legend-pill pill-critical">Critical ≥ 2.50</span>
+                                <div class="btn-group-segmented" id="radiationRangeGroup">
+                                    <button class="btn-seg active" data-range="20">Live (20 pts)</button>
+                                    <button class="btn-seg" data-range="50">50 pts</button>
+                                    <button class="btn-seg" data-range="100">100 pts</button>
+                                    <button class="btn-seg" data-range="500">History (500)</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="chart-wrapper-large">
+                            <canvas id="radiationAdcChart"></canvas>
+                        </div>
+                        <div class="chart-footer-note">
+                            <span>⚡ Raw ADC samples at 1s cadence. Clearly labelled as ADC reading — no conversion applied unless sensor calibration is confirmed.</span>
+                            <span class="badge-demo-inline" style="display: none;">DEMO DATA</span>
+                        </div>
+                    </div>
+
+                    <!-- Graph B: Short-Window Average -->
+                    <div class="multi-chart-grid" style="margin-bottom:1rem;">
+                        <div class="card">
+                            <div class="card-header">
+                                <div>
+                                    <h3 class="card-title">Graph B — Short-Window Average (3 readings)</h3>
+                                    <p class="card-subtitle">Rolling 3-sample mean ≈ 3s smoothing at 1Hz sampling rate</p>
+                                </div>
+                                <span class="badge-demo-inline" style="display: none;">DEMO DATA</span>
+                            </div>
+                            <div class="chart-wrapper-medium">
+                                <canvas id="radiationShortChart"></canvas>
+                            </div>
+                            <div class="chart-footer-note">
+                                <span style="color:#f59e0b;">Short Mean = avg of previous 3 ADC readings</span>
+                            </div>
+                        </div>
+
+                        <!-- Graph C: Long-Window Average -->
+                        <div class="card">
+                            <div class="card-header">
+                                <div>
+                                    <h3 class="card-title">Graph C — Long-Window Average (30 readings)</h3>
+                                    <p class="card-subtitle">Rolling 30-sample mean ≈ 30s baseline at 1Hz sampling rate</p>
+                                </div>
+                                <span class="badge-demo-inline" style="display: none;">DEMO DATA</span>
+                            </div>
+                            <div class="chart-wrapper-medium">
+                                <canvas id="radiationLongChart"></canvas>
+                            </div>
+                            <div class="chart-footer-note">
+                                <span style="color:#a855f7;">Long Mean = avg of previous 30 ADC readings (baseline reference)</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Table A: Current Values / Reference Table -->
+                    <div class="card" style="margin-bottom:1rem;">
+                        <div class="card-header">
+                            <div>
+                                <h3 class="card-title">Table A — Radiation Current Values / Reference Comparison</h3>
+                                <p class="card-subtitle">
+                                    Score = ((Short Mean − Reference Mean) / Reference Mean) × 100% |
+                                    Normal: |Score| &lt; 50% · Warning: 50–200% · Critical: ≥ 200%
+                                </p>
+                            </div>
+                            <span class="badge-demo-inline" style="display: none;">DEMO DATA</span>
+                        </div>
+                        <div class="table-container">
+                            <table class="telemetry-table">
+                                <thead>
+                                    <tr>
+                                        <th>Event ID</th>
+                                        <th>Timestamp (UTC)</th>
+                                        <th>Short Mean (µSv/h)</th>
+                                        <th>Reference Mean (µSv/h)</th>
+                                        <th>Score (%)</th>
+                                        <th>Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="radAnalysisTableBody">
+                                    <tr><td colspan="6" class="table-empty">Awaiting radiation analysis data…</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="chart-footer-note" style="font-size:0.72rem; color:#64748b; padding:0.5rem 1rem;">
+                            Reference Mean = long-window average (or 0.16 µSv/h nominal during warm-up). Score uses absolute deviation.
+                        </div>
+                    </div>
+
+                    <!-- Table B: Highest Recorded Values -->
+                    <div class="card" style="margin-bottom:1rem;">
+                        <div class="card-header">
+                            <div>
+                                <h3 class="card-title">Table B — Highest Recorded Average Values</h3>
+                                <p class="card-subtitle">Peak short-window and long-window averages recorded since server start</p>
+                            </div>
+                            <span class="badge-demo-inline" style="display: none;">DEMO DATA</span>
+                        </div>
+                        <div class="table-container">
+                            <table class="telemetry-table">
+                                <thead>
+                                    <tr>
+                                        <th>Metric</th>
+                                        <th>Maximum Value (µSv/h)</th>
+                                        <th>Timestamp (UTC)</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td><strong>Max Short-Window Mean</strong></td>
+                                        <td id="radMaxShortMean">--</td>
+                                        <td id="radMaxShortTs">--</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Max Long-Window Mean</strong></td>
+                                        <td id="radMaxLongMean">--</td>
+                                        <td id="radMaxLongTs">--</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="chart-footer-note" style="font-size:0.72rem; color:#64748b; padding:0.5rem 1rem;">
+                            Maxima calculated from actual recorded average values — not raw ADC peaks. Reset on server restart.
+                        </div>
+                    </div>
+
+                </section>
+
+                <!-- 4. SECONDARY MULTI-METRIC TELEMETRY CHARTS -->
+                <section class="multi-chart-grid">
+                    
+                    <!-- GEOMAGNETIC TREND -->
+                    <div class="card">
+                        <div class="card-header">
+                            <div>
+                                <h3 class="card-title">Geomagnetic Flux Density (µT)</h3>
+                                <p class="card-subtitle">Ambient magnetic vector vs nominal baseline</p>
+                            </div>
+                            <span class="badge-demo-inline" style="display: none;">DEMO DATA</span>
+                        </div>
+                        <div class="chart-wrapper-medium">
+                            <canvas id="magneticChart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- POWER BUS DUAL AXIS (VOLTAGE & CURRENT) -->
+                    <div class="card">
+                        <div class="card-header">
+                            <div>
+                                <h3 class="card-title">Power Bus Stability</h3>
+                                <p class="card-subtitle">Bus Voltage (3.3V Rail) & Current Consumption</p>
+                            </div>
+                            <span class="badge-demo-inline" style="display: none;">DEMO DATA</span>
+                        </div>
+                        <div class="chart-wrapper-medium">
+                            <canvas id="powerChart"></canvas>
+                        </div>
+                    </div>
+
+                </section>
+
+                <!-- 5. ALERT HISTORY & SUDDEN CHANGE LOG -->
+                <section class="card" id="alerts-section">
+                    <div class="card-header">
+                        <div>
+                            <h3 class="card-title">Abnormal Condition & Sudden-Spike Alert Log</h3>
+                            <p class="card-subtitle">Persisted event log stored in SQLite with severity classification</p>
+                        </div>
+                        <div class="card-actions">
+                            <button class="btn btn-sm btn-outline" id="btnAckAllAlerts">✓ Acknowledge All</button>
+                            <button class="btn btn-sm btn-danger-outline" id="btnClearAlerts">🗑️ Clear History</button>
+                        </div>
+                    </div>
+                    <div class="table-container">
+                        <table class="telemetry-table" id="alertsTable">
+                            <thead>
+                                <tr>
+                                    <th>Severity</th>
+                                    <th>Timestamp (UTC)</th>
+                                    <th>Subsystem</th>
+                                    <th>Recorded Value</th>
+                                    <th>Alert / Spike Message</th>
+                                    <th>Status</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="alertsTableBody">
+                                <tr>
+                                    <td colspan="7" class="table-empty">No active alerts recorded. System operating nominal.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <!-- 6. HISTORICAL DATA TELEMETRY TABLE -->
+                <section class="card" id="telemetry-table">
+                    <div class="card-header">
+                        <div>
+                            <h3 class="card-title">Recent Telemetry Packet Stream</h3>
+                            <p class="card-subtitle">Raw recorded packets stored in SQLite database</p>
+                        </div>
+                        <div class="card-actions">
+                            <button class="btn btn-sm btn-outline" id="btnRefreshHistory">🔄 Refresh</button>
+                            <button class="btn btn-sm btn-primary" id="btnExportCsv2">📥 Download CSV</button>
+                        </div>
+                    </div>
+                    <div class="table-container">
+                        <table class="telemetry-table" id="historyTable">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Timestamp (UTC)</th>
+                                    <th>Radiation (µSv/h)</th>
+                                    <th>Temp (°C)</th>
+                                    <th>Voltage (V)</th>
+                                    <th>Current (A)</th>
+                                    <th>Magnetic (µT)</th>
+                                    <th>Health</th>
+                                    <th>Data Source</th>
+                                </tr>
+                            </thead>
+                            <tbody id="historyTableBody">
+                                <tr>
+                                    <td colspan="9" class="table-empty">Connecting to telemetry backend...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+            </main>
+
+            <!-- FOOTER -->
+            <footer class="app-footer">
+                <div class="footer-left">
+                    <strong>Radiation and Space-Weather Monitor</strong> • Aerospace Hackathon 2026 Project
+                </div>
+                <div class="footer-center">
+                    <span class="footer-warning">⚠️ ALL SIMULATED READINGS CLEARLY MARKED AS DEMO DATA</span>
+                </div>
+                <div class="footer-right">
+                    <span>Flask 3 + SQLite3 Backend • ESP32 Ready</span>
+                </div>
+            </footer>
+
+        </div>
+    </div>
+
+    <!-- MODAL 1: ESP32 HARDWARE INTEGRATION GUIDE -->
+    <div class="modal-backdrop" id="esp32Modal">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <div>
+                    <h3 class="modal-title">ESP32 & Real Sensor Integration Guide</h3>
+                    <p class="modal-subtitle">Transitioning from Demo Mode to Physical Hardware</p>
+                </div>
+                <button class="modal-close-btn" id="esp32ModalClose">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="alert-info-box">
+                    <strong>Modular Architecture:</strong> The dashboard is fully operational in <em>Demo Mode</em>. When your team attaches physical hardware, point the ESP32 to this machine's local IP address and port <code>5000</code>.
+                </div>
+
+                <h4>1. REST API Endpoint Specification</h4>
+                <p>The Flask backend accepts telemetry via standard HTTP POST:</p>
+                <pre class="code-block">POST http://&lt;YOUR_PC_LOCAL_IP&gt;:5000/api/readings
+Content-Type: application/json
+
+{
+  "radiation": 0.24,
+  "temperature": 26.5,
+  "voltage": 3.31,
+  "current": 0.18,
+  "magnetic": 47.8,
+  "source": "esp32"
+}</pre>
+
+                <h4>2. Ready-to-Flash Arduino / ESP32 C++ Snippet</h4>
+                <pre class="code-block">#include &lt;WiFi.h&gt;
+#include &lt;HTTPClient.h&gt;
+#include &lt;ArduinoJson.h&gt;
+
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+// Find your PC IP using 'ipconfig' in Windows PowerShell
+const char* serverUrl = "http://192.168.1.100:5000/api/readings";
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected! Ready to stream telemetry.");
+}
+
+void loop() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(serverUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    // Read your physical sensors (Geiger tube, thermistor, ADC, magnetometer)
+    StaticJsonDocument&lt;200&gt; doc;
+    doc["radiation"] = 0.22;    // Replace with Geiger counter reading (uSv/h)
+    doc["temperature"] = 25.4;  // Replace with physical temp sensor (deg C)
+    doc["voltage"] = 3.30;      // Replace with ADC rail voltage (V)
+    doc["current"] = 0.19;      // Replace with current sensor (A)
+    doc["magnetic"] = 48.2;     // Replace with I2C magnetometer (uT)
+    doc["source"] = "esp32";
+
+    String requestBody;
+    serializeJson(doc, requestBody);
+
+    int httpResponseCode = http.POST(requestBody);
+    Serial.printf("POST status: %d\n", httpResponseCode);
+    http.end();
+  }
+  delay(2000); // 2 second telemetry cadence
+}</pre>
+
+                <h4>3. Safety Notice</h4>
+                <p>Do not expose the Flask development server directly to the public internet without an encrypted VPN or reverse proxy.</p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="esp32ModalCloseBtn">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL 2: THRESHOLDS & CALIBRATION VIEW -->
+    <div class="modal-backdrop" id="thresholdsModal">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <div>
+                    <h3 class="modal-title">Subsystem Thresholds & Calibration Limits</h3>
+                    <p class="modal-subtitle">Demo-Calibrated Alert Rules</p>
+                </div>
+                <button class="modal-close-btn" id="thresholdsModalClose">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="alert-warning-box">
+                    <strong>CALIBRATION NOTICE:</strong> Example values are demo-calibrated for demonstration and aerospace simulation. They must be calibrated for physical sensors before flight tests and are not certified safety limits.
+                </div>
+
+                <table class="telemetry-table" style="margin-top: 1rem;">
+                    <thead>
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Unit</th>
+                            <th>Nominal Band</th>
+                            <th>Warning Band</th>
+                            <th>Critical Hazard</th>
+                            <th>Spike Delta</th>
+                        </tr>
+                    </thead>
+                    <tbody id="thresholdsTableBody">
+                        <!-- Populated by JS -->
+                    </tbody>
+                </table>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="thresholdsModalCloseBtn">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- SCRIPTS -->
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/charts.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
