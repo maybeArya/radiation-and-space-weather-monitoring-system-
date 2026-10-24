@@ -1,0 +1,181 @@
+/**
+ * Radiation and Space-Weather Monitor
+ * API Client Module (Vanilla JS Fetch API)
+ * Communicates with Flask backend REST endpoints
+ */
+
+const MonitorAPI = (() => {
+    const BASE_URL = '';
+
+    /**
+     * Generic fetch wrapper with timeout and JSON error parsing
+     */
+    async function request(endpoint, options = {}) {
+        const url = `${BASE_URL}${endpoint}`;
+        const defaultHeaders = {
+            'Accept': 'application/json'
+        };
+
+        if (options.body && typeof options.body === 'string') {
+            defaultHeaders['Content-Type'] = 'application/json';
+        }
+
+        const config = {
+            ...options,
+            headers: {
+                ...defaultHeaders,
+                ...(options.headers || {})
+            }
+        };
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        config.signal = controller.signal;
+
+        try {
+            const response = await fetch(url, config);
+            clearTimeout(timeoutId);
+
+            let data;
+            const contentType = response.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+                data = await response.json();
+            } else {
+                data = await response.text();
+            }
+
+            if (!response.ok) {
+                const errorMsg = (data && data.error) ? data.error : `HTTP ${response.status}: ${response.statusText}`;
+                throw new Error(errorMsg);
+            }
+
+            return data;
+        } catch (err) {
+            clearTimeout(timeoutId);
+            if (err.name === 'AbortError') {
+                throw new Error('API Request timed out after 8s');
+            }
+            throw err;
+        }
+    }
+
+    return {
+        /**
+         * GET /api/health
+         */
+        async getHealth() {
+            return await request('/api/health');
+        },
+
+        /**
+         * GET /api/readings/latest
+         */
+        async getLatestReading() {
+            return await request('/api/readings/latest');
+        },
+
+        /**
+         * GET /api/readings/history?limit=N
+         */
+        async getReadingsHistory(limit = 100) {
+            return await request(`/api/readings/history?limit=${encodeURIComponent(limit)}`);
+        },
+
+        /**
+         * POST /api/readings
+         */
+        async postReading(readingData) {
+            return await request('/api/readings', {
+                method: 'POST',
+                body: JSON.stringify(readingData)
+            });
+        },
+
+        /**
+         * GET /api/alerts?limit=N&unacknowledged_only=bool
+         */
+        async getAlerts(limit = 50, unackOnly = false) {
+            return await request(`/api/alerts?limit=${encodeURIComponent(limit)}&unacknowledged_only=${encodeURIComponent(unackOnly)}`);
+        },
+
+        /**
+         * POST /api/alerts/acknowledge
+         */
+        async acknowledgeAlerts(alertId = null) {
+            const payload = alertId !== null ? { alert_id: alertId } : {};
+            return await request('/api/alerts/acknowledge', {
+                method: 'POST',
+                body: JSON.stringify(payload)
+            });
+        },
+
+        /**
+         * POST /api/alerts/clear
+         */
+        async clearAlerts() {
+            return await request('/api/alerts/clear', {
+                method: 'POST'
+            });
+        },
+
+        /**
+         * POST /api/demo/start
+         */
+        async startDemo(interval = 1.0) {
+            return await request('/api/demo/start', {
+                method: 'POST',
+                body: JSON.stringify({ interval })
+            });
+        },
+
+        /**
+         * POST /api/demo/stop
+         */
+        async stopDemo() {
+            return await request('/api/demo/stop', {
+                method: 'POST'
+            });
+        },
+
+        /**
+         * GET /api/demo/status
+         */
+        async getDemoStatus() {
+            return await request('/api/demo/status');
+        },
+
+        /**
+         * POST /api/demo/inject
+         */
+        async injectAnomaly(type) {
+            return await request('/api/demo/inject', {
+                method: 'POST',
+                body: JSON.stringify({ type })
+            });
+        },
+
+        /**
+         * GET /api/config
+         */
+        async getConfig() {
+            return await request('/api/config');
+        },
+
+        /**
+         * GET /api/readings/analysis — Radiation window analysis (3 graphs + 2 tables)
+         */
+        async getRadiationAnalysis() {
+            return await request('/api/readings/analysis');
+        },
+
+        /**
+         * CSV export URL
+         */
+        getCsvExportUrl() {
+            return '/api/export/csv';
+        }
+    };
+})();
+
+// Attach to window
+window.MonitorAPI = MonitorAPI;
