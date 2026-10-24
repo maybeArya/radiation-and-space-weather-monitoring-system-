@@ -1,0 +1,371 @@
+"""
+Database Module for Radiation and Space-Weather Monitor
+Manages SQLite storage for sensor readings, alerts, and system configuration.
+"""
+
+import sqlite3
+import os
+import csv
+import io
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Any, Tuple
+
+
+DEFAULT_DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance')
+DEFAULT_DB_PATH = os.path.join(DEFAULT_DB_DIR, 'monitor.db')
+
+
+def ensure_instance_folder(db_path: str = DEFAULT_DB_PATH) -> None:
+    """Ensure the instance directory exists before creating the database."""
+    folder = os.path.dirname(os.path.abspath(db_path))
+    if not os.path.exists(folder):
+        os.makedirs(folder, exist_ok=True)
+
+
+def get_db_connection(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
+    """
+    Creates and returns a thread-safe connection to the SQLite database.
+    Enables WAL mode and Row factory for fast dictionary-like access.
+    """
+    ensure_instance_folder(db_path)
+    conn = sqlite3.connect(db_path, timeout=10.0, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+
+
+def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
+    """
+    Initialize SQLite tables if they do not already exist.
+    Creates tables for readings, alerts, and system_config.
+    """
+    ensure_instance_folder(db_path)
+    conn = get_db_connection(db_path)
+    try:
+        with conn:
+            # 1. Readings table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS readings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    radiation REAL NOT NULL,
+                    temperature REAL NOT NULL,
+                    voltage REAL NOT NULL,
+                    current REAL NOT NULL,
+                    magnetic REAL NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'demo',
+                    risk_score INTEGER NOT NULL DEFAULT 100,
+                    risk_status TEXT NOT NULL DEFAULT 'NORMAL'
+                );
+            """)
+
+            # Index on readings timestamp for fast history queries
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_readings_timestamp 
+                ON readings (timestamp);
+            """)
+
+            # Non-destructive schema migration: ensure station_id exists in readings table
+            col_cursor = conn.execute("PRAGMA table_info(readings);")
+            col_names = [row['name'] for row in col_cursor.fetchall()]
+            if 'station_id' not in col_names:
+                conn.execute("ALTER TABLE readings ADD COLUMN station_id TEXT DEFAULT 'RSWM-STATION-01';")
+
+            # 2. Alerts table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    sensor TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    value REAL,
+                    acknowledged INTEGER NOT NULL DEFAULT 0
+                );
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_alerts_timestamp 
+                ON alerts (timestamp DESC);
+            """)
+
+            # 3. System Configuration table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS system_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+            """)
+
+            # Insert default station info if missing
+            defaults = [
+                ('station_name', 'Ground Station Alpha (Simulated)'),
+                ('station_id', 'GSA-GEO-01'),
+                ('hardware_mode', 'demo'),
+                ('demo_interval_sec', '2.0')
+            ]
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for key, val in defaults:
+                conn.execute("""
+                    INSERT OR IGNORE INTO system_config (key, value, updated_at)
+                    VALUES (?, ?, ?);
+                """, (key, val, now_iso))
+
+    finally:
+        conn.close()
+
+
+def insert_reading(data: Dict[str, Any], db_path: str = DEFAULT_DB_PATH) -> Dict[str, Any]:
+    """
+    Inserts a validated reading into the database.
+    Returns the inserted record as a dict with its generated ID.
+    Prevents duplicate insertions if the exact same timestamp & values are resubmitted.
+    """
+    timestamp = data.get('timestamp') or datetime.now(timezone.utc).isoformat()
+    radiation = float(data['radiation'])
+    temperature = float(data['temperature'])
+    voltage = float(data['voltage'])
+    current = float(data['current'])
+    magnetic = float(data['magnetic'])
+    source = str(data.get('source', 'demo')).lower()
+    risk_score = int(data.get('risk_score', 100))
+    risk_status = str(data.get('risk_status', 'NORMAL')).upper()
+    station_id = str(data.get('station_id') or 'RSWM-STATION-01')
+
+    conn = get_db_connection(db_path)
+    try:
+        with conn:
+            # Check for duplicate submission (same timestamp, source, and values)
+            existing = conn.execute("""
+                SELECT id, timestamp, radiation, temperature, voltage, current, 
+                       magnetic, source, risk_score, risk_status, station_id
+                FROM readings
+                WHERE timestamp = ? AND source = ?
+                LIMIT 1;
+            """, (timestamp, source)).fetchone()
+
+            if existing and abs(existing['radiation'] - radiation) < 1e-4 and abs(existing['temperature'] - temperature) < 1e-4:
+                return dict(existing)
+
+            cursor = conn.execute("""
+                INSERT INTO readings (
+                    timestamp, radiation, temperature, voltage, current, 
+                    magnetic, source, risk_score, risk_status, station_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """, (
+                timestamp, radiation, temperature, voltage, current,
+                magnetic, source, risk_score, risk_status, station_id
+            ))
+            reading_id = cursor.lastrowid
+            
+        return {
+            'id': reading_id,
+            'timestamp': timestamp,
+            'radiation': radiation,
+            'temperature': temperature,
+            'voltage': voltage,
+            'current': current,
+            'magnetic': magnetic,
+            'source': source,
+            'risk_score': risk_score,
+            'risk_status': risk_status,
+            'station_id': station_id
+        }
+    finally:
+        conn.close()
+
+
+def get_latest_reading(db_path: str = DEFAULT_DB_PATH) -> Optional[Dict[str, Any]]:
+    """Fetches the most recent sensor reading from the database."""
+    conn = get_db_connection(db_path)
+    try:
+        cursor = conn.execute("""
+            SELECT id, timestamp, radiation, temperature, voltage, current, 
+                   magnetic, source, risk_score, risk_status
+            FROM readings
+            ORDER BY id DESC
+            LIMIT 1;
+        """)
+        row = cursor.fetchone()
+        if row:
+            return dict(row)
+        return None
+    finally:
+        conn.close()
+
+
+def get_readings_history(limit: int = 100, db_path: str = DEFAULT_DB_PATH) -> List[Dict[str, Any]]:
+    """
+    Returns the most recent `limit` readings, ordered chronologically (oldest to newest)
+    so frontend charts can render time-series curves directly without reordering.
+    """
+    conn = get_db_connection(db_path)
+    try:
+        # Fetch latest N in descending order, then reverse to chronological order
+        cursor = conn.execute("""
+            SELECT id, timestamp, radiation, temperature, voltage, current, 
+                   magnetic, source, risk_score, risk_status
+            FROM readings
+            ORDER BY id DESC
+            LIMIT ?;
+        """, (limit,))
+        rows = cursor.fetchall()
+        # Convert to dict and sort ascending by id / timestamp
+        history = [dict(r) for r in reversed(rows)]
+        return history
+    finally:
+        conn.close()
+
+
+def insert_alert(
+    sensor: str,
+    severity: str,
+    message: str,
+    value: Optional[float] = None,
+    timestamp: Optional[str] = None,
+    db_path: str = DEFAULT_DB_PATH
+) -> Dict[str, Any]:
+    """Inserts a new alert event into the database."""
+    if not timestamp:
+        timestamp = datetime.now(timezone.utc).isoformat()
+    severity = severity.upper()
+
+    conn = get_db_connection(db_path)
+    try:
+        with conn:
+            cursor = conn.execute("""
+                INSERT INTO alerts (timestamp, sensor, severity, message, value, acknowledged)
+                VALUES (?, ?, ?, ?, ?, 0);
+            """, (timestamp, sensor, severity, message, value))
+            alert_id = cursor.lastrowid
+        return {
+            'id': alert_id,
+            'timestamp': timestamp,
+            'sensor': sensor,
+            'severity': severity,
+            'message': message,
+            'value': value,
+            'acknowledged': 0
+        }
+    finally:
+        conn.close()
+
+
+def get_alerts(
+    limit: int = 50,
+    unacknowledged_only: bool = False,
+    db_path: str = DEFAULT_DB_PATH
+) -> List[Dict[str, Any]]:
+    """Returns alerts ordered newest first."""
+    conn = get_db_connection(db_path)
+    try:
+        if unacknowledged_only:
+            cursor = conn.execute("""
+                SELECT id, timestamp, sensor, severity, message, value, acknowledged
+                FROM alerts
+                WHERE acknowledged = 0
+                ORDER BY id DESC
+                LIMIT ?;
+            """, (limit,))
+        else:
+            cursor = conn.execute("""
+                SELECT id, timestamp, sensor, severity, message, value, acknowledged
+                FROM alerts
+                ORDER BY id DESC
+                LIMIT ?;
+            """, (limit,))
+        return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def acknowledge_alerts(alert_id: Optional[int] = None, db_path: str = DEFAULT_DB_PATH) -> int:
+    """
+    Acknowledge alerts. If alert_id is provided, marks that specific alert.
+    If alert_id is None, marks all currently unacknowledged alerts.
+    Returns the number of rows modified.
+    """
+    conn = get_db_connection(db_path)
+    try:
+        with conn:
+            if alert_id is not None:
+                cursor = conn.execute("""
+                    UPDATE alerts SET acknowledged = 1 WHERE id = ?;
+                """, (alert_id,))
+            else:
+                cursor = conn.execute("""
+                    UPDATE alerts SET acknowledged = 1 WHERE acknowledged = 0;
+                """)
+            return cursor.rowcount
+    finally:
+        conn.close()
+
+
+def clear_alerts(db_path: str = DEFAULT_DB_PATH) -> int:
+    """Clears all alerts from the database. Returns count of deleted rows."""
+    conn = get_db_connection(db_path)
+    try:
+        with conn:
+            cursor = conn.execute("DELETE FROM alerts;")
+            return cursor.rowcount
+    finally:
+        conn.close()
+
+
+def export_readings_csv(db_path: str = DEFAULT_DB_PATH) -> str:
+    """Generates an RFC 4180 compliant CSV string of all readings in the database."""
+    conn = get_db_connection(db_path)
+    try:
+        cursor = conn.execute("""
+            SELECT id, 
+                   COALESCE(station_id, 'RSWM-STATION-01') AS station_id,
+                   timestamp, radiation, temperature, voltage, current, 
+                   magnetic, source, risk_score, risk_status
+            FROM readings
+            ORDER BY id ASC;
+        """)
+        rows = cursor.fetchall()
+        
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            'ID', 'Station ID', 'Timestamp (ISO 8601)', 'Radiation (uSv/h)', 'Temperature (deg C)',
+            'Voltage (V)', 'Current (A)', 'Magnetic Field (uT)', 'Data Source',
+            'Demo Risk Score (%)', 'Health Status'
+        ])
+        for r in rows:
+            writer.writerow([
+                r['id'], r['station_id'], r['timestamp'], r['radiation'], r['temperature'],
+                r['voltage'], r['current'], r['magnetic'], r['source'],
+                r['risk_score'], r['risk_status']
+            ])
+        return output.getvalue()
+    finally:
+        conn.close()
+
+
+def get_config_map(db_path: str = DEFAULT_DB_PATH) -> Dict[str, str]:
+    """Returns all key-value pairs stored in system_config."""
+    conn = get_db_connection(db_path)
+    try:
+        cursor = conn.execute("SELECT key, value FROM system_config;")
+        return {row['key']: row['value'] for row in cursor.fetchall()}
+    finally:
+        conn.close()
+
+
+def set_config_value(key: str, value: str, db_path: str = DEFAULT_DB_PATH) -> None:
+    """Sets or updates a key-value pair in system_config."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection(db_path)
+    try:
+        with conn:
+            conn.execute("""
+                INSERT INTO system_config (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at;
+            """, (key, value, now_iso))
+    finally:
+        conn.close()
