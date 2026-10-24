@@ -1,0 +1,840 @@
+/**
+ * Radiation and Space-Weather Monitor
+ * Main Application Orchestrator
+ * Coordinates UI updates, live polling, alert handling, and interactions
+ */
+
+document.addEventListener('DOMContentLoaded', () => {
+    // App State
+    let isDemoRunning = false;  // Demo starts OFF by default — user must click Start
+    let prevReadings = null;
+    let pollIntervalId = null;
+    let lastAlertCount = 0;
+
+    // DOM Elements
+    const elements = {
+        // Clocks
+        utcClock: document.getElementById('utcClock'),
+        localClock: document.getElementById('localClock'),
+
+        // Topbar
+        modePill: document.getElementById('modePill'),
+        modeText: document.getElementById('modeText'),
+        connectionPill: document.getElementById('connectionPill'),
+        connDot: document.getElementById('connDot'),
+        connStatusText: document.getElementById('connStatusText'),
+        lastPacketTime: document.getElementById('lastPacketTime'),
+        sidebarStationId: document.getElementById('sidebarStationId'),
+
+        // Controls
+        btnToggleDemo: document.getElementById('btnToggleDemo'),
+        demoBtnText: document.getElementById('demoBtnText'),
+        demoBtnIcon: document.getElementById('demoBtnIcon'),
+        btnInjectFlare: document.getElementById('btnInjectFlare'),
+        btnInjectSag: document.getElementById('btnInjectSag'),
+        btnExportCsv: document.getElementById('btnExportCsv'),
+        btnExportCsv2: document.getElementById('btnExportCsv2'),
+        btnOpenThresholds: document.getElementById('btnOpenThresholds'),
+        navAlertBadge: document.getElementById('navAlertBadge'),
+
+        // Banner
+        spikeAlertBanner: document.getElementById('spikeAlertBanner'),
+        bannerTitle: document.getElementById('bannerTitle'),
+        bannerMessage: document.getElementById('bannerMessage'),
+        bannerCloseBtn: document.getElementById('bannerCloseBtn'),
+
+        // Health Score
+        radialRing: document.getElementById('radialRing'),
+        healthScoreVal: document.getElementById('healthScoreVal'),
+        healthRiskBadge: document.getElementById('healthRiskBadge'),
+        healthStatusTitle: document.getElementById('healthStatusTitle'),
+        healthStatusDesc: document.getElementById('healthStatusDesc'),
+        healthReasonsList: document.getElementById('healthReasonsList'),
+
+        // Kp Meter
+        kpBadge: document.getElementById('kpBadge'),
+        kpNeedle: document.getElementById('kpNeedle'),
+
+        // Tables
+        alertsTableBody: document.getElementById('alertsTableBody'),
+        historyTableBody: document.getElementById('historyTableBody'),
+        btnAckAllAlerts: document.getElementById('btnAckAllAlerts'),
+        btnClearAlerts: document.getElementById('btnClearAlerts'),
+        btnRefreshHistory: document.getElementById('btnRefreshHistory'),
+
+        // Radiation Analysis Tables
+        radAnalysisTableBody: document.getElementById('radAnalysisTableBody'),
+        radMaxShortMean: document.getElementById('radMaxShortMean'),
+        radMaxShortTs: document.getElementById('radMaxShortTs'),
+        radMaxLongMean: document.getElementById('radMaxLongMean'),
+        radMaxLongTs: document.getElementById('radMaxLongTs'),
+
+        // Modals
+        esp32Modal: document.getElementById('esp32Modal'),
+        esp32ModalClose: document.getElementById('esp32ModalClose'),
+        esp32ModalCloseBtn: document.getElementById('esp32ModalCloseBtn'),
+        navEsp32Link: document.getElementById('navEsp32Link'),
+        thresholdsModal: document.getElementById('thresholdsModal'),
+        thresholdsModalClose: document.getElementById('thresholdsModalClose'),
+        thresholdsModalCloseBtn: document.getElementById('thresholdsModalCloseBtn'),
+        thresholdsTableBody: document.getElementById('thresholdsTableBody'),
+
+        // Mobile Drawer
+        mobileMenuBtn: document.getElementById('mobileMenuBtn'),
+        drawerCloseBtn: document.getElementById('drawerCloseBtn'),
+        drawerOverlay: document.getElementById('drawerOverlay'),
+        sidebar: document.getElementById('sidebar')
+    };
+
+    // Sensor Keys
+    const SENSORS = ['radiation', 'temperature', 'voltage', 'current', 'magnetic'];
+
+    /**
+     * Initialize Clocks
+     */
+    function startClocks() {
+        function tick() {
+            const now = new Date();
+            // Format UTC
+            const utcStr = now.toISOString().substring(11, 19) + ' UTC';
+            // Format Local
+            const localStr = now.toTimeString().split(' ')[0];
+
+            if (elements.utcClock) elements.utcClock.textContent = utcStr;
+            if (elements.localClock) elements.localClock.textContent = localStr;
+        }
+        tick();
+        setInterval(tick, 1000);
+    }
+
+    /**
+     * Update Metric Card
+     */
+    function updateMetricCard(sensor, value, status, source) {
+        const valElem = document.getElementById(`val-${sensor}`);
+        const badgeElem = document.getElementById(`badge-${sensor}`);
+        const trendElem = document.getElementById(`trend-${sensor}`);
+        const fillElem = document.getElementById(`fill-${sensor}`);
+        const cardElem = document.getElementById(`card-${sensor}`);
+
+        if (!valElem || value === undefined || value === null) return;
+
+        // Display Value
+        let formattedVal;
+        if (sensor === 'radiation') formattedVal = value.toFixed(3);
+        else if (sensor === 'temperature') formattedVal = value.toFixed(1);
+        else if (sensor === 'voltage') formattedVal = value.toFixed(3);
+        else if (sensor === 'current') formattedVal = value.toFixed(3);
+        else formattedVal = value.toFixed(1);
+
+        valElem.textContent = formattedVal;
+
+        // Status Badge & Card Glow
+        const normStatus = (status || 'NORMAL').toUpperCase();
+        if (badgeElem) {
+            badgeElem.textContent = normStatus;
+            badgeElem.className = `status-badge ${normStatus.toLowerCase()}`;
+        }
+
+        if (cardElem) {
+            cardElem.classList.remove('critical-glow', 'warning-glow');
+            if (normStatus === 'CRITICAL') cardElem.classList.add('critical-glow');
+            else if (normStatus === 'WARNING') cardElem.classList.add('warning-glow');
+
+            // Dynamic Source Badge update (DEMO DATA vs ESP32 HARDWARE)
+            const sourceBadge = cardElem.querySelector('.demo-data-label');
+            if (sourceBadge) {
+                if (source === 'esp32') {
+                    sourceBadge.textContent = 'ESP32 HARDWARE';
+                    sourceBadge.className = 'demo-data-label live-hardware';
+                } else {
+                    sourceBadge.textContent = 'DEMO DATA';
+                    sourceBadge.className = 'demo-data-label';
+                }
+            }
+        }
+
+        // Trend calculation
+        if (prevReadings && prevReadings[sensor] !== undefined && trendElem) {
+            const diff = value - prevReadings[sensor];
+            const sign = diff > 0 ? '+' : '';
+            let trendUnit = sensor === 'radiation' ? 'µSv/h' : sensor === 'temperature' ? '°C' : sensor === 'voltage' ? 'V' : sensor === 'current' ? 'A' : 'µT';
+            let trendClass = 'neutral';
+            if (Math.abs(diff) > 0.001) {
+                trendClass = diff > 0 ? 'up' : 'down';
+            }
+            trendElem.textContent = `${sign}${diff.toFixed(2)} ${trendUnit}`;
+            trendElem.className = `trend-indicator ${trendClass}`;
+        }
+
+        // Fill Progress Bar
+        if (fillElem) {
+            let pct = 0;
+            if (sensor === 'radiation') pct = Math.min(100, Math.max(5, (value / 3.0) * 100));
+            else if (sensor === 'temperature') pct = Math.min(100, Math.max(5, ((value + 10) / 80) * 100));
+            else if (sensor === 'voltage') pct = Math.min(100, Math.max(5, (value / 4.5) * 100));
+            else if (sensor === 'current') pct = Math.min(100, Math.max(5, (value / 0.6) * 100));
+            else if (sensor === 'magnetic') pct = Math.min(100, Math.max(5, (value / 90) * 100));
+
+            fillElem.style.width = `${pct}%`;
+            if (normStatus === 'CRITICAL') fillElem.style.background = '#ef4444';
+            else if (normStatus === 'WARNING') fillElem.style.background = '#f59e0b';
+            else fillElem.style.background = 'linear-gradient(90deg, #10b981, #22d3ee)';
+        }
+    }
+
+    /**
+     * Update Overall Electronics Health & Risk Indicator
+     */
+    function updateHealthScore(score, status, reasons) {
+        if (!elements.healthScoreVal) return;
+
+        const val = typeof score === 'number' ? score : 100;
+        const normStatus = (status || 'NORMAL').toUpperCase();
+
+        elements.healthScoreVal.textContent = val;
+
+        // Radial Ring Conic Gradient
+        let ringColor = 'var(--status-normal)';
+        if (normStatus === 'WARNING') ringColor = 'var(--status-warning)';
+        else if (normStatus === 'CRITICAL') ringColor = 'var(--status-critical)';
+
+        elements.radialRing.style.background = `conic-gradient(${ringColor} 0% ${val}%, var(--border-subtle) ${val}% 100%)`;
+
+        // Badge & Header
+        if (elements.healthRiskBadge) {
+            elements.healthRiskBadge.textContent = normStatus;
+            elements.healthRiskBadge.className = `status-badge ${normStatus.toLowerCase()}`;
+        }
+
+        if (elements.healthStatusTitle) {
+            if (normStatus === 'NORMAL') {
+                elements.healthStatusTitle.textContent = 'OPTIMAL NOMINAL OPERATION';
+                elements.healthStatusTitle.style.color = 'var(--status-normal)';
+                elements.healthStatusDesc.textContent = 'All sensor avionics and power delivery rails operate within nominal tolerances.';
+            } else if (normStatus === 'WARNING') {
+                elements.healthStatusTitle.textContent = 'ELEVATED SUBSYSTEM RISK';
+                elements.healthStatusTitle.style.color = 'var(--status-warning)';
+                elements.healthStatusDesc.textContent = 'One or more subsystem rails are outside standard baseline limits.';
+            } else {
+                elements.healthStatusTitle.textContent = 'CRITICAL SUBSYSTEM HAZARD';
+                elements.healthStatusTitle.style.color = 'var(--status-critical)';
+                elements.healthStatusDesc.textContent = 'Severe hazard or sudden spike detected. Protective intervention recommended.';
+            }
+        }
+
+        // Reasons list
+        if (elements.healthReasonsList) {
+            elements.healthReasonsList.innerHTML = '';
+            if (reasons && reasons.length > 0) {
+                reasons.forEach(r => {
+                    const li = document.createElement('li');
+                    li.textContent = r;
+                    elements.healthReasonsList.appendChild(li);
+                });
+            } else {
+                const li = document.createElement('li');
+                li.textContent = 'Telemetry bus operating in nominal flight envelope.';
+                elements.healthReasonsList.appendChild(li);
+            }
+        }
+    }
+
+    /**
+     * Update Planetary Kp Index Gauge from Magnetic Field
+     */
+    function updateKpIndex(magneticVal) {
+        if (!elements.kpBadge || !elements.kpNeedle || magneticVal === undefined) return;
+
+        // Approximate Planetary Kp Index from geomagnetic flux deviation (25-65 uT nominal)
+        let delta = Math.abs(magneticVal - 46.0);
+        let kp = Math.min(9.0, Math.max(0.5, (delta / 4.5)));
+        kp = Math.round(kp * 10) / 10;
+
+        let levelName = 'Quiet';
+        let badgeClass = 'quiet';
+        if (kp >= 6.0) {
+            levelName = 'Severe Storm';
+            badgeClass = 'storm';
+        } else if (kp >= 4.5) {
+            levelName = 'Minor Storm';
+            badgeClass = 'storm';
+        } else if (kp >= 3.5) {
+            levelName = 'Active';
+            badgeClass = 'active';
+        } else if (kp >= 2.5) {
+            levelName = 'Unsettled';
+            badgeClass = 'quiet';
+        }
+
+        elements.kpBadge.textContent = `Kp ${kp} (${levelName})`;
+        elements.kpBadge.className = `kp-val-badge ${badgeClass}`;
+
+        // Map 0-9 to percentage 0% - 98%
+        const pct = Math.min(96, Math.max(2, (kp / 9.0) * 100));
+        elements.kpNeedle.style.left = `${pct}%`;
+    }
+
+    /**
+     * Render Radiation Analysis Table A: Current Values / Reference Table
+     */
+    function renderRadiationAnalysisTable(snapshot) {
+        if (!elements.radAnalysisTableBody) return;
+
+        if (!snapshot || snapshot.status === 'NO DATA' || snapshot.short_mean === null) {
+            elements.radAnalysisTableBody.innerHTML = `
+                <tr><td colspan="6" class="table-empty">No radiation data yet. Start Demo or connect ESP32.</td></tr>
+            `;
+            return;
+        }
+
+        const timeStr = snapshot.timestamp
+            ? snapshot.timestamp.replace('T', ' ').substring(0, 19) + ' UTC'
+            : '--';
+        const statusClass = snapshot.status === 'CRITICAL' ? 'critical'
+            : snapshot.status === 'WARNING' ? 'warning' : 'normal';
+        const scoreStr = snapshot.score !== null ? `${snapshot.score.toFixed(2)}%` : '--';
+
+        elements.radAnalysisTableBody.innerHTML = `
+            <tr>
+                <td>#${snapshot.event_id}</td>
+                <td>${timeStr}</td>
+                <td>${snapshot.short_mean !== null ? snapshot.short_mean.toFixed(4) : '--'} µSv/h</td>
+                <td>${snapshot.reference_mean !== null ? snapshot.reference_mean.toFixed(4) : '--'} µSv/h</td>
+                <td>${scoreStr}</td>
+                <td><span class="status-badge ${statusClass}">${snapshot.status}</span></td>
+            </tr>
+        `;
+    }
+
+    /**
+     * Render Radiation Table B: Highest Recorded Values
+     */
+    function renderRadiationMaxTable(snapshot) {
+        if (!snapshot) return;
+
+        if (elements.radMaxShortMean) {
+            elements.radMaxShortMean.textContent = snapshot.max_short_mean !== null
+                ? `${snapshot.max_short_mean.toFixed(4)} µSv/h` : '--';
+        }
+        if (elements.radMaxShortTs) {
+            elements.radMaxShortTs.textContent = snapshot.max_short_mean_ts
+                ? snapshot.max_short_mean_ts.replace('T', ' ').substring(0, 19) + ' UTC' : '--';
+        }
+        if (elements.radMaxLongMean) {
+            elements.radMaxLongMean.textContent = snapshot.max_long_mean !== null
+                ? `${snapshot.max_long_mean.toFixed(4)} µSv/h` : '--';
+        }
+        if (elements.radMaxLongTs) {
+            elements.radMaxLongTs.textContent = snapshot.max_long_mean_ts
+                ? snapshot.max_long_mean_ts.replace('T', ' ').substring(0, 19) + ' UTC' : '--';
+        }
+    }
+
+    /**
+     * Render Alerts Table
+     */
+    function renderAlerts(alerts) {
+        if (!elements.alertsTableBody) return;
+
+        if (!alerts || alerts.length === 0) {
+            elements.alertsTableBody.innerHTML = `
+                <tr><td colspan="7" class="table-empty">No active alerts recorded. System operating nominal.</td></tr>
+            `;
+            if (elements.navAlertBadge) elements.navAlertBadge.textContent = '0';
+            return;
+        }
+
+        const unackCount = alerts.filter(a => !a.acknowledged).length;
+        if (elements.navAlertBadge) {
+            elements.navAlertBadge.textContent = unackCount;
+            elements.navAlertBadge.style.display = unackCount > 0 ? 'inline-block' : 'none';
+        }
+
+        // Detect new unacknowledged alerts to show banner toast
+        if (unackCount > lastAlertCount && unackCount > 0) {
+            const latestAlert = alerts[0];
+            showSpikeBanner(latestAlert.severity, latestAlert.message);
+        }
+        lastAlertCount = unackCount;
+
+        let html = '';
+        alerts.forEach(a => {
+            const sev = (a.severity || 'INFO').toUpperCase();
+            const sevClass = sev === 'CRITICAL' ? 'critical' : (sev === 'WARNING' ? 'warning' : 'normal');
+            const timeStr = a.timestamp ? a.timestamp.replace('T', ' ').substring(0, 19) : '--';
+            const isAck = a.acknowledged ? '<span style="color:#64748b">Acknowledged</span>' : '<span style="color:#f59e0b;font-weight:600">ACTIVE</span>';
+            const actionBtn = !a.acknowledged
+                ? `<button class="btn btn-sm btn-outline btn-ack-one" data-id="${a.id}">Acknowledge</button>`
+                : `<span style="color:#64748b;font-size:0.7rem">Archived</span>`;
+
+            html += `
+                <tr>
+                    <td><span class="status-badge ${sevClass}">${sev}</span></td>
+                    <td>${timeStr}</td>
+                    <td><strong>${(a.sensor || '').toUpperCase()}</strong></td>
+                    <td>${a.value !== null && a.value !== undefined ? a.value : '--'}</td>
+                    <td>${a.message}</td>
+                    <td>${isAck}</td>
+                    <td>${actionBtn}</td>
+                </tr>
+            `;
+        });
+
+        elements.alertsTableBody.innerHTML = html;
+
+        // Bind single ack buttons
+        document.querySelectorAll('.btn-ack-one').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                const id = e.target.getAttribute('data-id');
+                try {
+                    await MonitorAPI.acknowledgeAlerts(parseInt(id, 10));
+                    fetchAlertsData();
+                } catch (err) {
+                    console.error('Ack error:', err);
+                }
+            });
+        });
+    }
+
+    /**
+     * Show Sudden Spike Banner Toast
+     */
+    function showSpikeBanner(severity, message) {
+        if (!elements.spikeAlertBanner) return;
+        elements.bannerTitle.textContent = `${severity} EVENT DETECTED`;
+        elements.bannerMessage.textContent = message;
+        elements.spikeAlertBanner.classList.remove('hidden');
+
+        // Auto hide after 8s
+        setTimeout(() => {
+            if (elements.spikeAlertBanner) elements.spikeAlertBanner.classList.add('hidden');
+        }, 8000);
+    }
+
+    /**
+     * Render Historical Telemetry Table
+     */
+    function renderHistoryTable(readings) {
+        if (!elements.historyTableBody) return;
+
+        if (!readings || readings.length === 0) {
+            elements.historyTableBody.innerHTML = `
+                <tr><td colspan="9" class="table-empty">No telemetry recorded yet.</td></tr>
+            `;
+            return;
+        }
+
+        // Show newest first in the table
+        const reversed = [...readings].reverse().slice(0, 50);
+        let html = '';
+        reversed.forEach(r => {
+            const timeStr = r.timestamp ? r.timestamp.replace('T', ' ').substring(0, 19) : '--';
+            const sourceClass = r.source === 'esp32' ? 'esp32' : 'demo';
+            const sourceHtml = r.source === 'esp32' 
+                ? '<span class="badge-source esp32">ESP32 HARDWARE</span>' 
+                : '<span class="badge-source demo" style="display:none;">DEMO DATA</span>';
+            const healthBadge = r.risk_status === 'CRITICAL' ? 'critical' : (r.risk_status === 'WARNING' ? 'warning' : 'normal');
+
+            html += `
+                <tr>
+                    <td>#${r.id}</td>
+                    <td>${timeStr}</td>
+                    <td>${r.radiation.toFixed(3)}</td>
+                    <td>${r.temperature.toFixed(1)}</td>
+                    <td>${r.voltage.toFixed(3)}</td>
+                    <td>${r.current.toFixed(3)}</td>
+                    <td>${r.magnetic.toFixed(1)}</td>
+                    <td><span class="status-badge ${healthBadge}">${r.risk_score}%</span></td>
+                    <td>${sourceHtml}</td>
+                </tr>
+            `;
+        });
+        elements.historyTableBody.innerHTML = html;
+    }
+
+    /**
+     * Main Polling Routine
+     */
+    async function pollLatestData() {
+        try {
+            // 1. Fetch Latest Reading
+            const latestRes = await MonitorAPI.getLatestReading();
+            if (latestRes && latestRes.reading) {
+                const r = latestRes.reading;
+                const statuses = latestRes.sensor_statuses || {};
+
+                // Update metric cards with current reading source
+                SENSORS.forEach(sensor => {
+                    updateMetricCard(sensor, r[sensor], statuses[sensor], r.source);
+                });
+
+                // Update charts inline source badges
+                document.querySelectorAll('.badge-demo-inline').forEach(badge => {
+                    if (r.source === 'esp32') {
+                        badge.textContent = 'ESP32 HARDWARE';
+                        badge.className = 'badge-demo-inline live-hardware';
+                        badge.style.display = '';
+                    } else {
+                        badge.textContent = 'DEMO DATA';
+                        badge.className = 'badge-demo-inline';
+                        badge.style.display = 'none';
+                    }
+                });
+
+                // Update electronics health score
+                updateHealthScore(r.risk_score, r.risk_status, null);
+
+                // Update Kp index
+                updateKpIndex(r.magnetic);
+
+                // Push to live charts (magnetic & power only — radiation handled below)
+                MonitorCharts.addReading(r);
+
+                // Cache for trend diff
+                prevReadings = { ...r };
+
+                // Update Last Packet Time
+                if (elements.lastPacketTime && r.timestamp) {
+                    const timeAgo = formatTimeAgo(r.timestamp);
+                    elements.lastPacketTime.textContent = timeAgo;
+                }
+            }
+
+            // 2. Fetch Radiation Analysis for 3 graphs + 2 tables
+            try {
+                const analysisRes = await MonitorAPI.getRadiationAnalysis();
+                if (analysisRes && analysisRes.snapshot) {
+                    renderRadiationAnalysisTable(analysisRes.snapshot);
+                    renderRadiationMaxTable(analysisRes.snapshot);
+                }
+                if (analysisRes && analysisRes.history) {
+                    MonitorCharts.loadRadiationHistory(analysisRes.history);
+                }
+            } catch (ae) {
+                console.warn('Radiation analysis fetch notice:', ae.message);
+            }
+
+            // 3. Fetch Alerts
+            await fetchAlertsData();
+
+            // 4. Fetch Health & Connection Status
+            const healthRes = await MonitorAPI.getHealth();
+            if (healthRes) {
+                updateConnectionStatus(healthRes);
+            }
+
+        } catch (err) {
+            console.warn('Telemetry polling notice:', err.message);
+            // Mark backend offline state
+            if (elements.connDot) {
+                elements.connDot.className = 'pulsing-dot critical';
+                elements.connStatusText.textContent = 'DISCONNECTED (FLASK OFFLINE)';
+            }
+        }
+    }
+
+    /**
+     * Format relative time string
+     */
+    function formatTimeAgo(isoStr) {
+        try {
+            const diffSec = Math.round((Date.now() - new Date(isoStr).getTime()) / 1000);
+            if (diffSec < 2) return 'Just now (live)';
+            if (diffSec < 60) return `${diffSec}s ago`;
+            return `${Math.floor(diffSec / 60)}m ago`;
+        } catch {
+            return isoStr.substring(11, 19);
+        }
+    }
+
+    /**
+     * Update Hardware Connection Status Pill
+     */
+    function updateConnectionStatus(health) {
+        if (!elements.connectionPill || !elements.modePill) return;
+
+        const mode = (health.mode || 'demo').toLowerCase();
+        isDemoRunning = !!health.demo_generator_active;
+
+        if (mode === 'esp32' || mode === 'connected') {
+            elements.modePill.style.display = 'flex';
+            elements.modePill.className = 'mode-pill-badge live-connected';
+            elements.modeText.textContent = 'ESP32 CONNECTED';
+            elements.connDot.className = 'pulsing-dot success';
+            elements.connStatusText.textContent = 'HARDWARE ONLINE';
+        } else if (mode === 'offline') {
+            elements.modePill.style.display = 'flex';
+            elements.modePill.className = 'mode-pill-badge hardware-offline';
+            elements.modeText.textContent = 'ESP32 OFFLINE';
+            elements.connDot.className = 'pulsing-dot critical';
+            const secAgo = health.last_esp32_seconds_ago !== null && health.last_esp32_seconds_ago !== undefined
+                ? ` (${Math.round(health.last_esp32_seconds_ago)}s ago)`
+                : '';
+            elements.connStatusText.textContent = `TIMEOUT${secAgo}`;
+        } else if (mode === 'demo') {
+            elements.modePill.style.display = 'flex';
+            elements.modePill.className = 'mode-pill-badge';
+            elements.modeText.textContent = 'DEMO DATA ACTIVE';
+            elements.connDot.className = isDemoRunning ? 'pulsing-dot warning' : 'pulsing-dot neutral';
+            elements.connStatusText.textContent = isDemoRunning ? 'DEMO ENGINE RUNNING' : 'DEMO ENGINE PAUSED';
+        } else {
+            elements.modePill.style.display = 'flex';
+            elements.modePill.className = 'mode-pill-badge';
+            elements.modeText.textContent = 'STANDBY';
+            elements.connDot.className = 'pulsing-dot warning';
+            elements.connStatusText.textContent = 'IDLE / AWAITING DATA';
+        }
+
+        // Sync toggle button text
+        if (elements.demoBtnText && elements.demoBtnIcon) {
+            elements.demoBtnText.textContent = isDemoRunning ? 'Stop Demo' : 'Start Demo';
+            elements.demoBtnIcon.textContent = isDemoRunning ? '⏸' : '▶';
+        }
+    }
+
+    /**
+     * Fetch Alerts Data
+     */
+    async function fetchAlertsData() {
+        try {
+            const alertsRes = await MonitorAPI.getAlerts(30, false);
+            if (alertsRes && alertsRes.alerts) {
+                renderAlerts(alertsRes.alerts);
+            }
+        } catch (err) {
+            console.error('Failed to fetch alerts:', err);
+        }
+    }
+
+    /**
+     * Initial Boot Sequence
+     */
+    async function bootApplication() {
+        startClocks();
+        MonitorCharts.init();
+
+        // 1. Load System Config & Thresholds
+        try {
+            const cfg = await MonitorAPI.getConfig();
+            if (cfg && cfg.thresholds && elements.thresholdsTableBody) {
+                let thHtml = '';
+                Object.entries(cfg.thresholds).forEach(([k, t]) => {
+                    const normBand = t.normal_min !== undefined ? `${t.normal_min} - ${t.normal_max}` : `< ${t.normal_max}`;
+                    const warnBand = t.warning_min !== undefined ? `${t.warning_min} - ${t.warning_max}` : `${t.normal_max} - ${t.warning_max}`;
+                    const critBand = t.critical_min !== undefined ? `> ${t.critical_min}` : (t.critical_max !== undefined ? `> ${t.critical_max}` : `> ${t.warning_max}`);
+                    thHtml += `
+                        <tr>
+                            <td><strong>${t.name}</strong> (${k})</td>
+                            <td>${t.unit}</td>
+                            <td>${normBand}</td>
+                            <td>${warnBand}</td>
+                            <td>${critBand}</td>
+                            <td>±${t.spike_delta} ${t.unit}</td>
+                        </tr>
+                    `;
+                });
+                elements.thresholdsTableBody.innerHTML = thHtml;
+            }
+        } catch (e) {
+            console.warn('Config fetch notice:', e);
+        }
+
+        // 2. Load Historical Telemetry for Charts & Table
+        try {
+            const histRes = await MonitorAPI.getReadingsHistory(100);
+            if (histRes && histRes.readings && histRes.readings.length > 0) {
+                MonitorCharts.loadHistory(histRes.readings);
+                renderHistoryTable(histRes.readings);
+            }
+        } catch (e) {
+            console.warn('History fetch notice:', e);
+        }
+
+        // 2b. Load Radiation Analysis History for 3 graphs
+        try {
+            const analysisRes = await MonitorAPI.getRadiationAnalysis();
+            if (analysisRes && analysisRes.history) {
+                MonitorCharts.loadRadiationHistory(analysisRes.history);
+            }
+            if (analysisRes && analysisRes.snapshot) {
+                renderRadiationAnalysisTable(analysisRes.snapshot);
+                renderRadiationMaxTable(analysisRes.snapshot);
+            }
+        } catch (e) {
+            console.warn('Radiation analysis boot fetch notice:', e);
+        }
+
+        // 3. First live polling call
+        await pollLatestData();
+
+        // 4. Start 1.0s Recurring Polling (matches 1Hz radiation sampling)
+        pollIntervalId = setInterval(pollLatestData, 1000);
+    }
+
+    // -------------------------------------------------------------------------
+    // EVENT LISTENERS & USER INTERACTIONS
+    // -------------------------------------------------------------------------
+
+    // Toggle Demo Start / Stop
+    if (elements.btnToggleDemo) {
+        elements.btnToggleDemo.addEventListener('click', async () => {
+            try {
+                if (isDemoRunning) {
+                    await MonitorAPI.stopDemo();
+                } else {
+                    await MonitorAPI.startDemo(1.0);  // 1-second interval
+                }
+                const health = await MonitorAPI.getHealth();
+                updateConnectionStatus(health);
+            } catch (err) {
+                alert(`Error toggling demo mode: ${err.message}`);
+            }
+        });
+    }
+
+    // Inject Solar Flare Anomaly
+    if (elements.btnInjectFlare) {
+        elements.btnInjectFlare.addEventListener('click', async () => {
+            try {
+                await MonitorAPI.injectAnomaly('solar_flare');
+                showSpikeBanner('CRITICAL', 'Solar flare particle event injected into simulation stream!');
+            } catch (err) {
+                alert(`Failed to inject anomaly: ${err.message}`);
+            }
+        });
+    }
+
+    // Inject Voltage Sag Anomaly
+    if (elements.btnInjectSag) {
+        elements.btnInjectSag.addEventListener('click', async () => {
+            try {
+                await MonitorAPI.injectAnomaly('voltage_sag');
+                showSpikeBanner('WARNING', 'Simulated bus voltage sag & current surge injected!');
+            } catch (err) {
+                alert(`Failed to inject anomaly: ${err.message}`);
+            }
+        });
+    }
+
+    // Export CSV
+    function triggerCsvExport() {
+        window.location.href = MonitorAPI.getCsvExportUrl();
+    }
+    if (elements.btnExportCsv) elements.btnExportCsv.addEventListener('click', triggerCsvExport);
+    if (elements.btnExportCsv2) elements.btnExportCsv2.addEventListener('click', triggerCsvExport);
+
+    // Refresh History Table
+    if (elements.btnRefreshHistory) {
+        elements.btnRefreshHistory.addEventListener('click', async () => {
+            try {
+                const hist = await MonitorAPI.getReadingsHistory(100);
+                if (hist && hist.readings) {
+                    renderHistoryTable(hist.readings);
+                }
+            } catch (err) {
+                console.error(err);
+            }
+        });
+    }
+
+    // Acknowledge All Alerts
+    if (elements.btnAckAllAlerts) {
+        elements.btnAckAllAlerts.addEventListener('click', async () => {
+            try {
+                await MonitorAPI.acknowledgeAlerts(null);
+                await fetchAlertsData();
+            } catch (err) {
+                alert(`Failed to acknowledge alerts: ${err.message}`);
+            }
+        });
+    }
+
+    // Clear Alerts
+    if (elements.btnClearAlerts) {
+        elements.btnClearAlerts.addEventListener('click', async () => {
+            if (confirm('Are you sure you want to clear all alert logs from SQLite?')) {
+                try {
+                    await MonitorAPI.clearAlerts();
+                    await fetchAlertsData();
+                    if (elements.spikeAlertBanner) elements.spikeAlertBanner.classList.add('hidden');
+                } catch (err) {
+                    alert(`Failed to clear alerts: ${err.message}`);
+                }
+            }
+        });
+    }
+
+    // Close Banner
+    if (elements.bannerCloseBtn) {
+        elements.bannerCloseBtn.addEventListener('click', () => {
+            if (elements.spikeAlertBanner) elements.spikeAlertBanner.classList.add('hidden');
+        });
+    }
+
+    // Chart Range Selector Segmented Buttons
+    const rangeButtons = document.querySelectorAll('#radiationRangeGroup .btn-seg');
+    rangeButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+            rangeButtons.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            const range = btn.getAttribute('data-range');
+            MonitorCharts.setActiveRange(range);
+        });
+    });
+
+    // Modals: ESP32 Hardware Guide
+    function openEsp32Modal() {
+        if (elements.esp32Modal) elements.esp32Modal.classList.add('show');
+    }
+    function closeEsp32Modal() {
+        if (elements.esp32Modal) elements.esp32Modal.classList.remove('show');
+    }
+    if (elements.navEsp32Link) elements.navEsp32Link.addEventListener('click', (e) => { e.preventDefault(); openEsp32Modal(); });
+    if (elements.esp32ModalClose) elements.esp32ModalClose.addEventListener('click', closeEsp32Modal);
+    if (elements.esp32ModalCloseBtn) elements.esp32ModalCloseBtn.addEventListener('click', closeEsp32Modal);
+
+    // Modals: Thresholds Guide
+    function openThresholdsModal() {
+        if (elements.thresholdsModal) elements.thresholdsModal.classList.add('show');
+    }
+    function closeThresholdsModal() {
+        if (elements.thresholdsModal) elements.thresholdsModal.classList.remove('show');
+    }
+    if (elements.btnOpenThresholds) elements.btnOpenThresholds.addEventListener('click', openThresholdsModal);
+    if (elements.thresholdsModalClose) elements.thresholdsModalClose.addEventListener('click', closeThresholdsModal);
+    if (elements.thresholdsModalCloseBtn) elements.thresholdsModalCloseBtn.addEventListener('click', closeThresholdsModal);
+
+    // Close modals on backdrop click
+    window.addEventListener('click', (e) => {
+        if (e.target === elements.esp32Modal) closeEsp32Modal();
+        if (e.target === elements.thresholdsModal) closeThresholdsModal();
+    });
+
+    // Mobile Sidebar Drawer
+    if (elements.mobileMenuBtn) {
+        elements.mobileMenuBtn.addEventListener('click', () => {
+            elements.sidebar.classList.add('open');
+            elements.drawerOverlay.classList.add('active');
+        });
+    }
+    function closeDrawer() {
+        elements.sidebar.classList.remove('open');
+        elements.drawerOverlay.classList.remove('active');
+    }
+    if (elements.drawerCloseBtn) elements.drawerCloseBtn.addEventListener('click', closeDrawer);
+    if (elements.drawerOverlay) elements.drawerOverlay.addEventListener('click', closeDrawer);
+
+    // Sidebar navigation active state sync
+    const navLinks = document.querySelectorAll('.sidebar-nav .nav-link:not(#navEsp32Link)');
+    navLinks.forEach(link => {
+        link.addEventListener('click', () => {
+            navLinks.forEach(l => l.classList.remove('active'));
+            link.classList.add('active');
+            if (window.innerWidth <= 860) closeDrawer();
+        });
+    });
+
+    // Launch
+    bootApplication();
+});
