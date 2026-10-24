@@ -1,0 +1,1123 @@
+"""
+Radiation and Space-Weather Monitor
+Flask Web Application & REST API Backend
+
+Aerospace Hackathon 2026 Project
+Main Application Server
+"""
+
+import sys
+import os
+import math
+import random
+import threading
+import time
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional, Tuple
+
+# Ensure current directory is in sys.path for local module resolution
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from flask import Flask, jsonify, request, render_template, Response
+try:
+    from flask_cors import CORS
+    HAS_CORS = True
+except ImportError:
+    HAS_CORS = False
+
+import database as db
+
+# Initialize Flask App
+app = Flask(__name__, template_folder='templates', static_folder='static')
+if HAS_CORS:
+    CORS(app)
+
+SERVER_START_TIME = time.time()
+VERSION = "1.0.0"
+
+# -----------------------------------------------------------------------------
+# CONFIGURATION & THRESHOLDS
+# Demo-calibrated thresholds. Clearly stated as demo safety boundaries.
+# -----------------------------------------------------------------------------
+DEFAULT_THRESHOLDS = {
+    "radiation": {
+        "unit": "µSv/h",
+        "name": "Radiation Level",
+        "normal_max": 0.50,     # Normal: value < 0.50
+        "warning_min": 0.50,    # Warning: 0.50 <= value < 2.50
+        "warning_max": 2.50,    # Critical: value >= 2.50 (boundary fixed: no overlap)
+        "critical_min": 2.50,   # Critical threshold (strict >=, not shared with warning)
+        "spike_delta": 0.35,    # sudden jump in single reading
+        "sensor_min": 0.0,
+        "sensor_max": 1000.0,
+        "description": "Background radiation and high-energy particle flux."
+    },
+    "temperature": {
+        "unit": "°C",
+        "name": "Subsystem Temperature",
+        "normal_min": 15.0,
+        "normal_max": 40.0,
+        "warning_max": 60.0,
+        "critical_min": 60.0,
+        "spike_delta": 6.0,
+        "sensor_min": -50.0,
+        "sensor_max": 120.0,
+        "description": "Onboard payload and sensor package thermal status."
+    },
+    "voltage": {
+        "unit": "V",
+        "name": "Bus Voltage (3.3V Rail)",
+        "normal_min": 3.10,
+        "normal_max": 3.50,
+        "warning_min": 2.90,
+        "warning_max": 3.70,
+        "spike_delta": 0.30,
+        "sensor_min": 0.0,
+        "sensor_max": 12.0,
+        "description": "Power delivery bus stability for avionics & sensor circuits."
+    },
+    "current": {
+        "unit": "A",
+        "name": "Bus Current Draw",
+        "normal_min": 0.05,
+        "normal_max": 0.35,
+        "warning_max": 0.55,
+        "critical_min": 0.55,
+        "spike_delta": 0.18,
+        "sensor_min": 0.0,
+        "sensor_max": 5.0,
+        "description": "Current drawn by sensing payloads and telemetry radio."
+    },
+    "magnetic": {
+        "unit": "µT",
+        "name": "Geomagnetic Flux Density",
+        "normal_min": 25.0,
+        "normal_max": 65.0,
+        "warning_min": 15.0,
+        "warning_max": 85.0,
+        "critical_max": 85.0,
+        "spike_delta": 15.0,
+        "sensor_min": 0.0,
+        "sensor_max": 500.0,
+        "description": "Local magnetic field intensity / space weather geomagnetic perturbation."
+    }
+}
+
+SYSTEM_STATE = {
+    "hardware_mode": "idle",  # "demo", "esp32", "offline", or "idle" — starts idle, not demo
+    "last_received_time": None,
+    "last_received_source": "none",
+    "last_esp32_time": None,  # timestamp of last valid ESP32 reading
+    "esp32_timeout_seconds": 15.0,  # Timeout threshold for hardware disconnection
+    "total_readings_received": 0,
+    "last_sensor_values": {},
+    "last_alert_states": {},  # Tracks active alert states to prevent duplicates
+    "station_name": "Aerospace Ground Monitor Alpha",
+    "station_id": "RSWM-STATION-01"
+}
+
+
+def get_connection_status() -> Tuple[str, str]:
+    """
+    Evaluates current device connection state.
+    Returns: (mode: str, status_label: str)
+    - ('esp32', 'CONNECTED'): Valid ESP32 reading received within timeout
+    - ('offline', 'OFFLINE'): ESP32 was connected but timed out (no packets in >15s)
+    - ('demo', 'DEMO MODE'): Demo simulation generator is actively running
+    - ('idle', 'IDLE'): Server running, awaiting telemetry
+    """
+    last_esp32 = SYSTEM_STATE.get("last_esp32_time")
+    timeout = SYSTEM_STATE.get("esp32_timeout_seconds", 15.0)
+
+    if last_esp32 is not None:
+        elapsed = time.time() - last_esp32
+        if elapsed <= timeout:
+            return "esp32", "CONNECTED"
+        else:
+            if demo_generator.is_running():
+                return "demo", "DEMO MODE"
+            return "offline", "OFFLINE"
+
+    if demo_generator.is_running():
+        return "demo", "DEMO MODE"
+
+    return "idle", "IDLE"
+
+# -----------------------------------------------------------------------------
+# EVALUATION LOGIC: THRESHOLDS, SUDDEN CHANGES & ELECTRONICS HEALTH RISK
+# -----------------------------------------------------------------------------
+def evaluate_sensor_status(sensor_key: str, value: float) -> Tuple[str, Optional[str]]:
+    """
+    Evaluates reading against configurable thresholds.
+    Returns (status: 'NORMAL'|'WARNING'|'CRITICAL', explanation: Optional[str]).
+    """
+    cfg = DEFAULT_THRESHOLDS.get(sensor_key)
+    if not cfg:
+        return "NORMAL", None
+
+    unit = cfg["unit"]
+
+    if sensor_key == "radiation":
+        # Fixed boundary: Normal < 0.50, Warning [0.50, 2.50), Critical >= 2.50
+        if value >= cfg["critical_min"]:    # >= 2.50 → CRITICAL
+            return "CRITICAL", f"Radiation {value:.2f} {unit} exceeds critical threshold (>= {cfg['critical_min']} {unit})"
+        elif value >= cfg["warning_min"]:   # >= 0.50 and < 2.50 → WARNING
+            return "WARNING", f"Radiation {value:.2f} {unit} elevated above nominal (>= {cfg['warning_min']} {unit})"
+        return "NORMAL", None  # < 0.50 → NORMAL
+
+    elif sensor_key == "temperature":
+        if value >= cfg["critical_min"]:
+            return "CRITICAL", f"Temperature {value:.1f} {unit} overheating (> {cfg['critical_min']} {unit})"
+        elif value < 0.0:
+            return "CRITICAL", f"Temperature {value:.1f} {unit} sub-zero freezing hazard"
+        elif value > cfg["normal_max"] or value < cfg["normal_min"]:
+            return "WARNING", f"Temperature {value:.1f} {unit} out of nominal range ({cfg['normal_min']}-{cfg['normal_max']} {unit})"
+        return "NORMAL", None
+
+    elif sensor_key == "voltage":
+        if value < cfg["warning_min"]:
+            return "CRITICAL", f"Voltage {value:.2f} {unit} brownout hazard (< {cfg['warning_min']} {unit})"
+        elif value > cfg["warning_max"]:
+            return "CRITICAL", f"Voltage {value:.2f} {unit} overvoltage hazard (> {cfg['warning_max']} {unit})"
+        elif value < cfg["normal_min"] or value > cfg["normal_max"]:
+            return "WARNING", f"Voltage {value:.2f} {unit} outside nominal band ({cfg['normal_min']}-{cfg['normal_max']} {unit})"
+        return "NORMAL", None
+
+    elif sensor_key == "current":
+        if value >= cfg["critical_min"]:
+            return "CRITICAL", f"Current {value:.3f} {unit} short-circuit / overload hazard (> {cfg['critical_min']} {unit})"
+        elif value > cfg["normal_max"]:
+            return "WARNING", f"Current {value:.3f} {unit} elevated draw (> {cfg['normal_max']} {unit})"
+        return "NORMAL", None
+
+    elif sensor_key == "magnetic":
+        if value > cfg["warning_max"]:
+            return "CRITICAL", f"Geomagnetic field {value:.1f} {unit} severe disturbance (> {cfg['warning_max']} {unit})"
+        elif value < cfg["warning_min"]:
+            return "CRITICAL", f"Geomagnetic field {value:.1f} {unit} extreme anomaly (< {cfg['warning_min']} {unit})"
+        elif value > cfg["normal_max"] or value < cfg["normal_min"]:
+            return "WARNING", f"Geomagnetic field {value:.1f} {unit} geomagnetic variation detected"
+        return "NORMAL", None
+
+    return "NORMAL", None
+
+
+def detect_sudden_change(sensor_key: str, current_val: float, prev_val: Optional[float]) -> Optional[Dict[str, Any]]:
+    """
+    Detects sudden spikes or large deltas between consecutive samples.
+    Returns alert dict if a sudden spike occurred, else None.
+    """
+    if prev_val is None:
+        return None
+
+    cfg = DEFAULT_THRESHOLDS.get(sensor_key)
+    if not cfg:
+        return None
+
+    delta = abs(current_val - prev_val)
+    spike_limit = cfg.get("spike_delta", 9999.0)
+    unit = cfg["unit"]
+
+    if delta >= spike_limit:
+        severity = "CRITICAL" if delta >= (spike_limit * 1.8) else "WARNING"
+        sign = "+" if (current_val >= prev_val) else "-"
+        msg = f"Sudden change in {cfg['name']}: {sign}{delta:.2f} {unit} jump detected (from {prev_val:.2f} to {current_val:.2f} {unit})"
+        return {
+            "sensor": sensor_key,
+            "severity": severity,
+            "message": msg,
+            "value": round(current_val, 3),
+            "delta": round(delta, 3)
+        }
+    return None
+
+
+def calculate_electronics_health_risk(
+    sensor_statuses: Dict[str, str],
+    spikes: List[Dict[str, Any]],
+    explanations: List[str]
+) -> Tuple[int, str, List[str]]:
+    """
+    Calculates transparent demo subsystem health score (0-100%).
+    100 = Optimal nominal operation
+    < 80 = Warning (Elevated risk)
+    < 50 = Critical (Hazard)
+    Clearly marked as demo heuristic.
+    """
+    score = 100
+    reasons = []
+
+    # Penalties for sensor status
+    penalties = {
+        "radiation": {"WARNING": 20, "CRITICAL": 45},
+        "temperature": {"WARNING": 15, "CRITICAL": 35},
+        "voltage": {"WARNING": 20, "CRITICAL": 40},
+        "current": {"WARNING": 15, "CRITICAL": 30},
+        "magnetic": {"WARNING": 10, "CRITICAL": 25}
+    }
+
+    for sensor, status in sensor_statuses.items():
+        if status in ("WARNING", "CRITICAL"):
+            pts = penalties.get(sensor, {}).get(status, 15)
+            score -= pts
+            reasons.append(f"{sensor.capitalize()} in {status} state (-{pts}% health)")
+
+    # Penalty for sudden spikes
+    for spike in spikes:
+        spike_pts = 15 if spike["severity"] == "CRITICAL" else 10
+        score -= spike_pts
+        reasons.append(f"Spike detected in {spike['sensor'].capitalize()} (-{spike_pts}% health)")
+
+    score = max(0, min(100, score))
+
+    if score >= 80:
+        overall_status = "NORMAL"
+        if not reasons:
+            reasons.append("All avionics and sensor rails operating within nominal flight envelope.")
+    elif score >= 50:
+        overall_status = "WARNING"
+    else:
+        overall_status = "CRITICAL"
+
+    return score, overall_status, reasons
+
+
+# -----------------------------------------------------------------------------
+# BACKGROUND DEMO DATA GENERATOR
+# Safely simulates telemetry without duplicate threads
+# -----------------------------------------------------------------------------
+class DemoTelemetryGenerator:
+    def __init__(self):
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self.interval = 1.0  # seconds between samples (1s for 1Hz radiation ADC sampling)
+        self.packets_generated = 0
+        self.anomaly_mode: Optional[str] = None  # None, 'solar_flare', 'voltage_sag', 'thermal_spike'
+
+        # Baseline states for smooth wandering simulation
+        self.cur_rad = 0.16
+        self.cur_temp = 24.2
+        self.cur_volt = 3.31
+        self.cur_curr = 0.19
+        self.cur_mag = 46.5
+
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    def start(self, interval: float = 1.0) -> bool:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False  # Already running, prevent duplicate loop
+            self.interval = max(0.5, float(interval))
+            self._stop_event.clear()
+            self._thread = threading.Thread(target=self._run_loop, daemon=True)
+            self._thread.start()
+            SYSTEM_STATE["hardware_mode"] = "demo"
+            return True
+
+    def stop(self) -> bool:
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                return False
+            self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=3.0)
+        with self._lock:
+            self._thread = None
+        return True
+
+    def trigger_anomaly(self, anomaly_type: str):
+        """Allows dashboard to inject a demo scenario for testing alerts."""
+        self.anomaly_mode = anomaly_type
+
+    def _next_sample(self) -> Dict[str, Any]:
+        """Generates realistic aerospace physics demo readings with noise and drift."""
+        # Baseline drift
+        self.cur_rad += random.uniform(-0.015, 0.015)
+        self.cur_temp += random.uniform(-0.15, 0.15)
+        self.cur_volt += random.uniform(-0.008, 0.008)
+        self.cur_curr += random.uniform(-0.005, 0.005)
+        self.cur_mag += random.uniform(-0.4, 0.4)
+
+        # Natural bounds pull
+        self.cur_rad += (0.16 - self.cur_rad) * 0.05
+        self.cur_temp += (24.0 - self.cur_temp) * 0.04
+        self.cur_volt += (3.30 - self.cur_volt) * 0.08
+        self.cur_curr += (0.19 - self.cur_curr) * 0.06
+        self.cur_mag += (46.0 - self.cur_mag) * 0.05
+
+        rad_val = max(0.05, self.cur_rad)
+        temp_val = self.cur_temp
+        volt_val = self.cur_volt
+        curr_val = max(0.02, self.cur_curr)
+        mag_val = max(5.0, self.cur_mag)
+
+        # Anomaly simulation if triggered or occasional natural cosmic event
+        if self.anomaly_mode == 'solar_flare':
+            rad_val += random.uniform(2.6, 4.2)  # Critical radiation flare
+            mag_val += random.uniform(25.0, 45.0)  # Magnetic storm
+            self.anomaly_mode = None  # One-shot spike
+        elif self.anomaly_mode == 'voltage_sag':
+            volt_val -= random.uniform(0.5, 0.8)  # Brownout
+            curr_val += random.uniform(0.35, 0.50)  # Current spike
+            self.anomaly_mode = None
+        elif self.anomaly_mode == 'thermal_spike':
+            temp_val += random.uniform(38.0, 45.0)  # Overheat
+            self.anomaly_mode = None
+        else:
+            # 2% chance of a slight minor natural event for dynamic live feel
+            if random.random() < 0.02:
+                rad_val += random.uniform(0.35, 0.65)  # Minor burst
+            elif random.random() < 0.015:
+                mag_val += random.uniform(12.0, 20.0)  # Magnetic wave
+
+        self.packets_generated += 1
+        return {
+            "radiation": round(rad_val, 3),
+            "temperature": round(temp_val, 2),
+            "voltage": round(volt_val, 3),
+            "current": round(curr_val, 3),
+            "magnetic": round(mag_val, 2),
+            "source": "demo"
+        }
+
+    def _run_loop(self):
+        """Worker loop that runs in the background."""
+        while not self._stop_event.is_set():
+            if SYSTEM_STATE.get("hardware_mode") == "esp32":
+                break
+            try:
+                sample = self._next_sample()
+                if self._stop_event.is_set() or SYSTEM_STATE.get("hardware_mode") == "esp32":
+                    break
+                process_and_save_reading(sample)
+            except Exception as e:
+                app.logger.error(f"Error in demo telemetry loop: {e}")
+            self._stop_event.wait(self.interval)
+
+
+demo_generator = DemoTelemetryGenerator()
+
+
+# -----------------------------------------------------------------------------
+# RADIATION WINDOW ANALYSIS ENGINE
+# Maintains in-memory rolling buffers for short and long window averages.
+# Reference mean = rolling long-window baseline (or startup nominal).
+# Score = ((short_mean - ref_mean) / ref_mean) * 100  (% deviation from baseline)
+# Status: Normal if Score < 50%, Warning if 50% <= Score < 200%, Critical if >= 200%
+# Windows: Short = previous 3 readings, Long = previous 30 readings
+# Event ID: Unique and stable ID assigned at creation, preserved across polling/refreshes.
+# -----------------------------------------------------------------------------
+class RadiationAnalysisEngine:
+    """
+    Tracks rolling radiation ADC readings for window averaging and anomaly scoring.
+    All calculations use actual recorded values with their real timestamps.
+    """
+    SHORT_WINDOW = 3    # previous 3 readings
+    LONG_WINDOW  = 30   # previous 30 readings
+    NOMINAL_REFERENCE = 0.16  # µSv/h — project baseline nominal for Earth surface background
+
+    # Score-based status thresholds (% deviation from reference mean)
+    STATUS_WARNING_SCORE  = 50.0    # >= 50% deviation → WARNING
+    STATUS_CRITICAL_SCORE = 200.0   # >= 200% deviation → CRITICAL
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        # list of dicts: {"timestamp": str, "value": float, "event_id": int}
+        self._readings: list = []
+        self._event_counter = 0
+
+        # Highest recorded values for Table B
+        self._max_short_mean: float = 0.0
+        self._max_short_mean_ts: str = ""
+        self._max_long_mean: float = 0.0
+        self._max_long_mean_ts: str = ""
+
+        # Running reference mean (long-window average kept rolling)
+        self._reference_mean: float = self.NOMINAL_REFERENCE
+
+    def add_reading(self, timestamp: str, value: float, event_id: Optional[int] = None) -> None:
+        """
+        Append a new radiation reading to the rolling buffer.
+        Assigns a unique and stable event_id once at creation time.
+        """
+        with self._lock:
+            if event_id is None:
+                self._event_counter += 1
+                assigned_id = self._event_counter
+            else:
+                assigned_id = int(event_id)
+                self._event_counter = max(self._event_counter, assigned_id)
+
+            self._readings.append({
+                "timestamp": timestamp,
+                "value": value,
+                "event_id": assigned_id
+            })
+
+            # Keep buffer bounded to at most LONG_WINDOW readings
+            if len(self._readings) > self.LONG_WINDOW:
+                self._readings = self._readings[-self.LONG_WINDOW:]
+
+            # Update rolling reference and peak values on genuine new reading
+            count = len(self._readings)
+            short_vals = [r["value"] for r in self._readings[-self.SHORT_WINDOW:]]
+            long_vals = [r["value"] for r in self._readings[-self.LONG_WINDOW:]]
+            short_mean = sum(short_vals) / len(short_vals) if short_vals else None
+            long_mean = sum(long_vals) / len(long_vals) if long_vals else None
+
+            if count >= self.SHORT_WINDOW and long_mean is not None:
+                self._reference_mean = long_mean
+
+            if short_mean is not None and short_mean > self._max_short_mean:
+                self._max_short_mean = short_mean
+                self._max_short_mean_ts = timestamp
+
+            if long_mean is not None and long_mean > self._max_long_mean:
+                self._max_long_mean = long_mean
+                self._max_long_mean_ts = timestamp
+
+    def _compute_window_mean(self, n: int) -> Optional[float]:
+        """Compute the mean of the last n readings. Returns None if buffer has < 1 reading."""
+        if not self._readings:
+            return None
+        window = self._readings[-n:]
+        values = [r["value"] for r in window]
+        return sum(values) / len(values) if values else None
+
+    def get_analysis(self) -> Dict[str, Any]:
+        """
+        Returns current radiation analysis snapshot (READ-ONLY query).
+        Does NOT increment event counter or alter existing IDs.
+        """
+        with self._lock:
+            if not self._readings:
+                return {
+                    "raw_adc": None,
+                    "short_mean": None,
+                    "long_mean": None,
+                    "reference_mean": self._reference_mean,
+                    "score": None,
+                    "status": "NO DATA",
+                    "event_id": 0,
+                    "timestamp": None,
+                    "max_short_mean": None,
+                    "max_short_mean_ts": None,
+                    "max_long_mean": None,
+                    "max_long_mean_ts": None,
+                    "window_sizes": {
+                        "short": self.SHORT_WINDOW,
+                        "long": self.LONG_WINDOW,
+                        "actual_count": 0
+                    }
+                }
+
+            last_entry = self._readings[-1]
+            last_ts = last_entry["timestamp"]
+            last_val = last_entry["value"]
+            last_event_id = last_entry["event_id"]
+            count = len(self._readings)
+
+            # Short-window average (previous 3 readings)
+            short_vals = [r["value"] for r in self._readings[-self.SHORT_WINDOW:]]
+            short_mean = sum(short_vals) / len(short_vals)
+
+            # Long-window average (previous 30 readings)
+            long_vals = [r["value"] for r in self._readings[-self.LONG_WINDOW:]]
+            long_mean = sum(long_vals) / len(long_vals)
+
+            # Reference mean: use long_mean if we have >= SHORT_WINDOW readings,
+            # else use the nominal baseline. This avoids transient startup artifacts.
+            if count >= self.SHORT_WINDOW and long_mean is not None:
+                self._reference_mean = long_mean
+            else:
+                self._reference_mean = self.NOMINAL_REFERENCE
+
+            ref = self._reference_mean if self._reference_mean > 0.0 else self.NOMINAL_REFERENCE
+
+            # Score: % deviation of short_mean from reference_mean
+            score = round(((short_mean - ref) / ref) * 100.0, 2)
+
+            # Status based on score
+            if abs(score) >= self.STATUS_CRITICAL_SCORE:
+                status = "CRITICAL"
+            elif abs(score) >= self.STATUS_WARNING_SCORE:
+                status = "WARNING"
+            else:
+                status = "NORMAL"
+
+            return {
+                "raw_adc": round(last_val, 4),
+                "short_mean": round(short_mean, 4),
+                "long_mean": round(long_mean, 4),
+                "reference_mean": round(ref, 4),
+                "score": score,
+                "status": status,
+                "event_id": last_event_id,
+                "timestamp": last_ts,
+                "max_short_mean": round(self._max_short_mean, 4),
+                "max_short_mean_ts": self._max_short_mean_ts if self._max_short_mean > 0 else None,
+                "max_long_mean": round(self._max_long_mean, 4),
+                "max_long_mean_ts": self._max_long_mean_ts if self._max_long_mean > 0 else None,
+                "window_sizes": {
+                    "short": self.SHORT_WINDOW,
+                    "long": self.LONG_WINDOW,
+                    "actual_count": count
+                }
+            }
+
+    def get_history(self) -> List[Dict[str, Any]]:
+        """
+        Returns the rolling buffer as a list of dicts with timestamp, raw_adc,
+        short_mean (rolling up to that point), long_mean, and event_id for graphing.
+        """
+        with self._lock:
+            result = []
+            readings_copy = list(self._readings)
+
+        for i, item in enumerate(readings_copy):
+            s_window = readings_copy[max(0, i - self.SHORT_WINDOW + 1): i + 1]
+            l_window = readings_copy[max(0, i - self.LONG_WINDOW + 1): i + 1]
+            s_vals = [r["value"] for r in s_window]
+            l_vals = [r["value"] for r in l_window]
+            sm = round(sum(s_vals) / len(s_vals), 4) if s_vals else None
+            lm = round(sum(l_vals) / len(l_vals), 4) if l_vals else None
+            result.append({
+                "timestamp": item["timestamp"],
+                "raw_adc": round(item["value"], 4),
+                "short_mean": sm,
+                "long_mean": lm,
+                "event_id": item["event_id"]
+            })
+        return result
+
+
+radiation_engine = RadiationAnalysisEngine()
+
+
+# -----------------------------------------------------------------------------
+# CORE PIPELINE: VALIDATE, PROCESS & RECORD READINGS
+# -----------------------------------------------------------------------------
+def process_and_save_reading(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Core function that validates incoming JSON, evaluates thresholds,
+    detects sudden changes, computes demo electronics health score,
+    deduplicates alerts, and saves to SQLite.
+    Shared by both demo loop and the POST /api/readings endpoint.
+    """
+    timestamp = data.get("timestamp") or datetime.now(timezone.utc).isoformat()
+    source = str(data.get("source", "demo")).strip().lower()
+    if source != "esp32":
+        source = "demo"
+
+    # Numeric conversions
+    rad = float(data["radiation"])
+    temp = float(data["temperature"])
+    volt = float(data["voltage"])
+    curr = float(data["current"])
+    mag = float(data["magnetic"])
+
+    values = {
+        "radiation": rad,
+        "temperature": temp,
+        "voltage": volt,
+        "current": curr,
+        "magnetic": mag
+    }
+
+    # Evaluate per-sensor thresholds
+    sensor_statuses = {}
+    explanations = []
+    generated_alerts = []
+
+    for key, val in values.items():
+        st, exp = evaluate_sensor_status(key, val)
+        sensor_statuses[key] = st
+        if exp:
+            explanations.append(exp)
+            # Alert generation with deduplication
+            last_state = SYSTEM_STATE["last_alert_states"].get(key)
+            if last_state != st:
+                # State transition into WARNING or CRITICAL
+                alert = db.insert_alert(
+                    sensor=key,
+                    severity=st,
+                    message=exp,
+                    value=val,
+                    timestamp=timestamp
+                )
+                generated_alerts.append(alert)
+                SYSTEM_STATE["last_alert_states"][key] = st
+        else:
+            # If normal, reset state
+            if SYSTEM_STATE["last_alert_states"].get(key) not in (None, "NORMAL"):
+                SYSTEM_STATE["last_alert_states"][key] = "NORMAL"
+
+    # Sudden change detection compared to previous values
+    prev_values = SYSTEM_STATE.get("last_sensor_values", {})
+    spikes = []
+    for key, val in values.items():
+        prev_val = prev_values.get(key)
+        spike = detect_sudden_change(key, val, prev_val)
+        if spike:
+            spikes.append(spike)
+            # Insert spike alert
+            alert = db.insert_alert(
+                sensor=key,
+                severity=spike["severity"],
+                message=spike["message"],
+                value=spike["value"],
+                timestamp=timestamp
+            )
+            generated_alerts.append(alert)
+
+    # Compute electronics health / risk score
+    risk_score, risk_status, reasons = calculate_electronics_health_risk(
+        sensor_statuses, spikes, explanations
+    )
+
+    # Insert into database
+    record = {
+        "timestamp": timestamp,
+        "radiation": rad,
+        "temperature": temp,
+        "voltage": volt,
+        "current": curr,
+        "magnetic": mag,
+        "source": source,
+        "risk_score": risk_score,
+        "risk_status": risk_status
+    }
+    saved_reading = db.insert_reading(record)
+
+    # Feed radiation reading into rolling window analysis engine with stable database event_id
+    radiation_engine.add_reading(timestamp, rad, event_id=saved_reading.get("id"))
+
+    # Update system live state
+    SYSTEM_STATE["last_received_time"] = timestamp
+    SYSTEM_STATE["last_received_source"] = source
+    SYSTEM_STATE["last_sensor_values"] = values
+    SYSTEM_STATE["total_readings_received"] += 1
+    if source == "esp32":
+        SYSTEM_STATE["last_esp32_time"] = time.time()
+        SYSTEM_STATE["hardware_mode"] = "esp32"
+        # Prioritize real telemetry: safely halt demo generator when valid ESP32 readings arrive
+        if demo_generator.is_running():
+            demo_generator.stop()
+            app.logger.info("Valid ESP32 reading received. Demo telemetry generator stopped.")
+
+    return {
+        "reading": saved_reading,
+        "sensor_statuses": sensor_statuses,
+        "risk_score": risk_score,
+        "risk_status": risk_status,
+        "risk_reasons": reasons,
+        "spikes_detected": spikes,
+        "new_alerts": generated_alerts
+    }
+
+
+# -----------------------------------------------------------------------------
+# REST API ROUTES
+# -----------------------------------------------------------------------------
+
+@app.route("/")
+def index():
+    """Serves the main application dashboard."""
+    return render_template("index.html")
+
+
+@app.route("/api/health", methods=["GET"])
+def api_health():
+    """Returns system status, active mode, uptime, and database status."""
+    uptime = round(time.time() - SERVER_START_TIME, 1)
+    db_ok = True
+    try:
+        # Check SQLite connection
+        conn = db.get_db_connection()
+        conn.execute("SELECT 1;").fetchone()
+        conn.close()
+    except Exception:
+        db_ok = False
+
+    mode, conn_status = get_connection_status()
+    last_esp32 = SYSTEM_STATE.get("last_esp32_time")
+    esp32_seconds_ago = round(time.time() - last_esp32, 1) if last_esp32 else None
+
+    return jsonify({
+        "status": "healthy" if db_ok else "database_error",
+        "app_name": "Radiation and Space-Weather Monitor",
+        "version": VERSION,
+        "uptime_seconds": uptime,
+        "database_connected": db_ok,
+        "mode": mode,
+        "connection_status": conn_status,
+        "demo_generator_active": demo_generator.is_running(),
+        "total_readings": SYSTEM_STATE["total_readings_received"],
+        "last_received_time": SYSTEM_STATE["last_received_time"],
+        "last_received_source": SYSTEM_STATE["last_received_source"],
+        "last_esp32_seconds_ago": esp32_seconds_ago,
+        "esp32_timeout_seconds": SYSTEM_STATE.get("esp32_timeout_seconds", 15.0),
+        "station_name": SYSTEM_STATE["station_name"],
+        "station_id": SYSTEM_STATE["station_id"]
+    })
+
+
+@app.route("/api/readings/latest", methods=["GET"])
+def api_latest_reading():
+    """Returns the latest stored sensor reading."""
+    reading = db.get_latest_reading()
+    if not reading:
+        return jsonify({
+            "status": "empty",
+            "message": "No sensor readings recorded yet. Start demo mode or transmit from ESP32.",
+            "reading": None
+        }), 200
+
+    # Calculate status badges on the fly
+    statuses = {}
+    for key in ["radiation", "temperature", "voltage", "current", "magnetic"]:
+        statuses[key], _ = evaluate_sensor_status(key, reading[key])
+
+    mode, conn_status = get_connection_status()
+
+    return jsonify({
+        "status": "success",
+        "reading": reading,
+        "sensor_statuses": statuses,
+        "hardware_mode": mode,
+        "connection_status": conn_status,
+        "last_received_time": SYSTEM_STATE["last_received_time"],
+        "last_received_source": reading.get("source", "demo")
+    })
+
+
+@app.route("/api/readings/history", methods=["GET"])
+def api_readings_history():
+    """
+    Returns historical readings in chronological order.
+    Query parameter: limit (default 100, max 1000).
+    """
+    try:
+        limit_param = request.args.get("limit", 100)
+        limit = max(1, min(1000, int(limit_param)))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid limit parameter. Must be an integer between 1 and 1000."}), 400
+
+    history = db.get_readings_history(limit=limit)
+    return jsonify({
+        "status": "success",
+        "count": len(history),
+        "limit": limit,
+        "readings": history
+    })
+
+
+@app.route("/api/readings/analysis", methods=["GET"])
+def api_radiation_analysis():
+    """
+    Returns radiation window analysis data for the dashboard graphs and tables.
+    Includes:
+      - current snapshot: raw_adc, short_mean, long_mean, reference_mean, score, status, event_id, timestamp
+      - max values: max_short_mean + ts, max_long_mean + ts
+      - rolling history: list of (timestamp, raw_adc, short_mean, long_mean) for all 3 graph datasets
+      - window config: short_window size, long_window size, actual buffered count
+    """
+    snapshot = radiation_engine.get_analysis()
+    history  = radiation_engine.get_history()
+
+    return jsonify({
+        "status": "success",
+        "snapshot": snapshot,
+        "history": history,
+        "window_config": {
+            "short_window_readings": RadiationAnalysisEngine.SHORT_WINDOW,
+            "long_window_readings":  RadiationAnalysisEngine.LONG_WINDOW,
+            "sampling_interval_seconds": demo_generator.interval,
+            "short_window_seconds": RadiationAnalysisEngine.SHORT_WINDOW * demo_generator.interval,
+            "long_window_seconds":  RadiationAnalysisEngine.LONG_WINDOW  * demo_generator.interval,
+        },
+        "score_thresholds": {
+            "warning_pct":  RadiationAnalysisEngine.STATUS_WARNING_SCORE,
+            "critical_pct": RadiationAnalysisEngine.STATUS_CRITICAL_SCORE,
+            "description": "Score = ((short_mean - ref_mean) / ref_mean) * 100. "
+                           "Normal: |Score| < 50%, Warning: 50% <= |Score| < 200%, Critical: |Score| >= 200%"
+        }
+    })
+
+
+@app.route("/api/readings", methods=["POST"])
+def api_post_reading():
+    """
+    Accepts JSON sensor telemetry from ESP32 hardware or simulation clients.
+    Expected schema:
+    {
+      "radiation": 12.4,
+      "temperature": 28.6,
+      "voltage": 3.3,
+      "current": 0.18,
+      "magnetic": 48.6,
+      "source": "esp32" | "demo"
+    }
+    """
+    if not request.is_json:
+        return jsonify({"error": "Request body must be valid application/json."}), 400
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Malformed JSON payload. Expected a JSON object."}), 400
+
+    required_fields = ["radiation", "temperature", "voltage", "current", "magnetic"]
+    missing = [f for f in required_fields if f not in payload]
+    if missing:
+        return jsonify({
+            "error": f"Missing required sensor fields: {', '.join(missing)}",
+            "expected_fields": required_fields
+        }), 400
+    validated = {}
+    for field in required_fields:
+        val = payload[field]
+        # Validate type is numeric and finite
+        if not isinstance(val, (int, float)) or isinstance(val, bool):
+            return jsonify({
+                "error": f"Field '{field}' must be a numeric value (int or float). Got: {type(val).__name__}"
+            }), 400
+        if math.isnan(val) or math.isinf(val):
+            return jsonify({
+                "error": f"Field '{field}' must be a finite number. Got non-finite value."
+            }), 400
+
+        # Sanity range checks
+        cfg = DEFAULT_THRESHOLDS.get(field, {})
+        s_min = cfg.get("sensor_min", -1000.0)
+        s_max = cfg.get("sensor_max", 10000.0)
+        if val < s_min or val > s_max:
+            return jsonify({
+                "error": f"Value for '{field}' ({val}) is outside physical sensor capability [{s_min}, {s_max}]."
+            }), 400
+        validated[field] = float(val)
+
+    # Source handling
+    source = payload.get("source", "demo")
+    if not isinstance(source, str) or source.lower() not in ("demo", "esp32", "manual"):
+        source = "demo"
+    validated["source"] = source.lower()
+
+    if "timestamp" in payload and isinstance(payload["timestamp"], str):
+        validated["timestamp"] = payload["timestamp"]
+
+    # When valid ESP32 hardware packet arrives, prioritize real data and safely halt demo loop
+    if validated["source"] == "esp32":
+        SYSTEM_STATE["hardware_mode"] = "esp32"
+        SYSTEM_STATE["last_esp32_time"] = time.time()
+        if demo_generator.is_running():
+            demo_generator.stop()
+
+    # Process reading through analysis and storage pipeline
+    result = process_and_save_reading(validated)
+
+    return jsonify({
+        "status": "success",
+        "message": "Telemetry reading accepted and recorded.",
+        "data": result
+    }), 201
+
+
+@app.route("/api/alerts", methods=["GET"])
+def api_get_alerts():
+    """Returns recent alerts from SQLite."""
+    try:
+        limit = max(1, min(200, int(request.args.get("limit", 50))))
+    except (ValueError, TypeError):
+        limit = 50
+
+    unack_only = request.args.get("unacknowledged_only", "false").lower() in ("true", "1")
+    alerts = db.get_alerts(limit=limit, unacknowledged_only=unack_only)
+    return jsonify({
+        "status": "success",
+        "count": len(alerts),
+        "alerts": alerts
+    })
+
+
+@app.route("/api/alerts/acknowledge", methods=["POST"])
+def api_acknowledge_alerts():
+    """Acknowledge one or all alerts."""
+    alert_id = None
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+        alert_id = data.get("alert_id")
+        if alert_id is not None:
+            try:
+                alert_id = int(alert_id)
+            except ValueError:
+                return jsonify({"error": "alert_id must be an integer."}), 400
+
+    modified = db.acknowledge_alerts(alert_id=alert_id)
+    return jsonify({
+        "status": "success",
+        "acknowledged_count": modified,
+        "message": f"Acknowledged {modified} alert(s)."
+    })
+
+
+@app.route("/api/alerts/clear", methods=["POST"])
+def api_clear_alerts():
+    """Clears all alerts from SQLite database."""
+    deleted = db.clear_alerts()
+    # Reset alert state tracker so subsequent anomalies can re-trigger cleanly
+    SYSTEM_STATE["last_alert_states"] = {}
+    return jsonify({
+        "status": "success",
+        "deleted_count": deleted,
+        "message": f"Cleared {deleted} alert records from database."
+    })
+
+
+@app.route("/api/demo/start", methods=["POST"])
+def api_demo_start():
+    """Start demo data generation safely, without starting duplicate loops."""
+    interval = 1.0  # Default 1-second interval for 1Hz radiation ADC sampling
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+        interval = float(data.get("interval", 1.0))
+
+    # Reset hardware override so demo simulation resumes cleanly
+    SYSTEM_STATE["last_esp32_time"] = None
+    SYSTEM_STATE["hardware_mode"] = "demo"
+
+    started = demo_generator.start(interval=interval)
+    return jsonify({
+        "status": "success" if started else "already_running",
+        "running": demo_generator.is_running(),
+        "interval_seconds": demo_generator.interval,
+        "message": "Demo telemetry generator started." if started else "Demo generator already running."
+    })
+
+
+@app.route("/api/demo/stop", methods=["POST"])
+def api_demo_stop():
+    """Stop demo data generation safely."""
+    stopped = demo_generator.stop()
+    if SYSTEM_STATE["hardware_mode"] == "demo":
+        SYSTEM_STATE["hardware_mode"] = "idle"
+    return jsonify({
+        "status": "success" if stopped else "already_stopped",
+        "running": demo_generator.is_running(),
+        "message": "Demo telemetry generator stopped." if stopped else "Demo generator was not active."
+    })
+
+
+@app.route("/api/demo/status", methods=["GET"])
+def api_demo_status():
+    """Returns demo generator status and packet counts."""
+    return jsonify({
+        "running": demo_generator.is_running(),
+        "interval_seconds": demo_generator.interval,
+        "packets_generated": demo_generator.packets_generated,
+        "anomaly_mode": demo_generator.anomaly_mode
+    })
+
+
+@app.route("/api/demo/inject", methods=["POST"])
+def api_demo_inject():
+    """Injects a simulated anomaly (solar_flare, voltage_sag, thermal_spike) for live test."""
+    if not demo_generator.is_running():
+        return jsonify({"error": "Demo mode must be running to inject simulated anomalies."}), 400
+
+    data = request.get_json(silent=True) or {}
+    anomaly_type = data.get("type", "solar_flare")
+    if anomaly_type not in ("solar_flare", "voltage_sag", "thermal_spike"):
+        return jsonify({"error": "Invalid anomaly type. Supported: 'solar_flare', 'voltage_sag', 'thermal_spike'."}), 400
+
+    demo_generator.trigger_anomaly(anomaly_type)
+    return jsonify({
+        "status": "success",
+        "injected": anomaly_type,
+        "message": f"Simulated {anomaly_type} queued for next telemetry pulse."
+    })
+
+
+@app.route("/api/config", methods=["GET"])
+def api_get_config():
+    """Returns configured thresholds and system parameters."""
+    return jsonify({
+        "status": "success",
+        "station_name": SYSTEM_STATE["station_name"],
+        "station_id": SYSTEM_STATE["station_id"],
+        "mode": SYSTEM_STATE["hardware_mode"],
+        "thresholds": DEFAULT_THRESHOLDS,
+        "disclaimer": (
+            "Thresholds and risk scores are demo-calibrated for aerospace simulation and hackathon showcase. "
+            "They are not certified safety limits and must be calibrated for physical sensors."
+        )
+    })
+
+
+@app.route("/api/export/csv", methods=["GET"])
+def api_export_csv():
+    """Exports all recorded readings as a downloadable CSV file."""
+    csv_data = db.export_readings_csv()
+    filename = f"radiation_space_weather_telemetry_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+# -----------------------------------------------------------------------------
+# APPLICATION ENTRYPOINT
+# -----------------------------------------------------------------------------
+def initialize_application():
+    """Initializes SQLite database and pre-populates initial baseline if empty."""
+    db.init_db()
+    latest = db.get_latest_reading()
+    if not latest:
+        # Pre-populate 5 baseline readings so charts display beautifully on initial launch
+        print("[INIT] Database empty. Pre-populating baseline demo telemetry...")
+        base_time = time.time() - 30
+        for i in range(12):
+            t_iso = datetime.fromtimestamp(base_time + (i * 2.5), tz=timezone.utc).isoformat()
+            sample = {
+                "timestamp": t_iso,
+                "radiation": round(0.14 + (random.uniform(-0.02, 0.03)), 3),
+                "temperature": round(23.8 + (random.uniform(-0.3, 0.4)), 2),
+                "voltage": round(3.31 + (random.uniform(-0.01, 0.01)), 3),
+                "current": round(0.18 + (random.uniform(-0.01, 0.02)), 3),
+                "magnetic": round(47.2 + (random.uniform(-0.6, 0.6)), 2),
+                "source": "demo"
+            }
+            process_and_save_reading(sample)
+
+    # Pre-populate rolling buffer from existing database readings so event IDs and averages persist across restarts
+    recent_readings = db.get_readings_history(limit=RadiationAnalysisEngine.LONG_WINDOW)
+    for r in recent_readings:
+        radiation_engine.add_reading(r['timestamp'], r['radiation'], event_id=r['id'])
+
+    # Demo generator does NOT auto-start on boot.
+    # It starts ONLY when the user explicitly clicks "Start Demo" in the dashboard.
+    # This ensures demo data never contaminates display before the user intends to see it.
+    print("[INIT] Flask server ready. Demo telemetry is OFF by default.")
+    print("[INIT] Click 'Start Demo' on the dashboard to begin simulated readings.")
+
+
+# Ensure DB is initialized when imported or run
+try:
+    initialize_application()
+except Exception as err:
+    print(f"[WARN] Initial DB startup deferred: {err}")
+
+
+if __name__ == "__main__":
+    # Local development server (do not expose directly to public internet)
+    port = int(os.environ.get("PORT", 5000))
+    print(f"================================================================")
+    print(f" Radiation and Space-Weather Monitor - Server Starting")
+    print(f" Aerospace Hackathon 2026 Project")
+    print(f" Local URL: http://127.0.0.1:{port}")
+    print(f" Hardware Mode: DEMO MODE (All data labelled as DEMO DATA)")
+    print(f"================================================================")
+    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
