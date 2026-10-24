@@ -1,0 +1,474 @@
+/**
+ * Radiation and Space-Weather Monitor
+ * Charts Module (Chart.js 4.x integration)
+ * Manages live time-series plots, threshold lines, and dual-axis power monitoring
+ *
+ * Radiation Analysis: 3 separate graphs
+ *   Graph A: Raw ADC Readings         (#radiationAdcChart)   — cyan
+ *   Graph B: Short-Window Average     (#radiationShortChart)  — amber/yellow
+ *   Graph C: Long-Window Average      (#radiationLongChart)   — purple/violet
+ *
+ * Power & Magnetic: unchanged from original
+ */
+
+const MonitorCharts = (() => {
+    // Radiation — three separate chart instances
+    let radAdcChart   = null;  // Graph A: Raw ADC
+    let radShortChart = null;  // Graph B: Short-Window Average
+    let radLongChart  = null;  // Graph C: Long-Window Average
+
+    // Other sensor charts
+    let magneticChart = null;
+    let powerChart    = null;
+
+    // Rolling history buffer for magnetic & power (keyed by timestamp)
+    const seenTimestamps = new Set();
+    const storedHistory  = [];
+    let activeLimit = 20;
+
+    // Rolling radiation history from /api/readings/analysis endpoint
+    // Each entry: { timestamp, raw_adc, short_mean, long_mean }
+    let radHistory = [];
+
+    /**
+     * Format ISO 8601 string to short HH:MM:SS time label
+     */
+    function formatTimeLabel(isoStr) {
+        if (!isoStr) return '';
+        try {
+            const d = new Date(isoStr);
+            return d.toTimeString().split(' ')[0];
+        } catch {
+            return isoStr.substring(11, 19);
+        }
+    }
+
+    /**
+     * Common Chart.js styling & options for dark aerospace theme
+     */
+    function getCommonOptions(yTitle, yMin = null, yMax = null) {
+        return {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: { duration: 300 },
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: {
+                    display: true,
+                    labels: {
+                        color: '#94a3b8',
+                        font: { family: "'JetBrains Mono', monospace", size: 11 },
+                        boxWidth: 12
+                    }
+                },
+                tooltip: {
+                    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                    titleColor: '#22d3ee',
+                    bodyColor: '#f8fafc',
+                    borderColor: '#334155',
+                    borderWidth: 1,
+                    padding: 10,
+                    titleFont: { family: "'JetBrains Mono', monospace" },
+                    bodyFont:  { family: "'JetBrains Mono', monospace" }
+                }
+            },
+            scales: {
+                x: {
+                    grid: { color: 'rgba(30, 41, 59, 0.6)' },
+                    ticks: {
+                        color: '#64748b',
+                        font: { family: "'JetBrains Mono', monospace", size: 10 },
+                        maxRotation: 0,
+                        autoSkip: true,
+                        maxTicksLimit: 8
+                    }
+                },
+                y: {
+                    title: {
+                        display: !!yTitle,
+                        text: yTitle,
+                        color: '#94a3b8',
+                        font: { family: "'Inter', sans-serif", size: 11, weight: '500' }
+                    },
+                    min: yMin,
+                    max: yMax,
+                    grid: { color: 'rgba(30, 41, 59, 0.6)' },
+                    ticks: {
+                        color: '#64748b',
+                        font: { family: "'JetBrains Mono', monospace", size: 10 }
+                    }
+                }
+            }
+        };
+    }
+
+    /**
+     * Graph A: Raw ADC Readings (cyan)
+     */
+    function initRadAdcChart() {
+        const ctx = document.getElementById('radiationAdcChart');
+        if (!ctx) return;
+
+        const chartCtx = ctx.getContext('2d');
+        const gradient = chartCtx.createLinearGradient(0, 0, 0, 260);
+        gradient.addColorStop(0, 'rgba(34, 211, 238, 0.35)');
+        gradient.addColorStop(1, 'rgba(7, 11, 20, 0.0)');
+
+        radAdcChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'ADC Reading (µSv/h)',
+                        data: [],
+                        borderColor: '#22d3ee',
+                        borderWidth: 2,
+                        backgroundColor: gradient,
+                        fill: true,
+                        tension: 0.25,
+                        pointRadius: 2,
+                        pointHoverRadius: 5,
+                        pointBackgroundColor: '#22d3ee'
+                    },
+                    {
+                        label: 'Normal Threshold (0.50 µSv/h)',
+                        data: [],
+                        borderColor: 'rgba(245, 158, 11, 0.6)',
+                        borderWidth: 1.5,
+                        borderDash: [5, 5],
+                        fill: false,
+                        pointRadius: 0
+                    },
+                    {
+                        label: 'Critical Threshold (2.50 µSv/h)',
+                        data: [],
+                        borderColor: 'rgba(239, 68, 68, 0.6)',
+                        borderWidth: 1.5,
+                        borderDash: [5, 5],
+                        fill: false,
+                        pointRadius: 0
+                    }
+                ]
+            },
+            options: getCommonOptions('ADC Reading (µSv/h)', 0, null)
+        });
+    }
+
+    /**
+     * Graph B: Short-Window Average (amber/yellow)
+     */
+    function initRadShortChart() {
+        const ctx = document.getElementById('radiationShortChart');
+        if (!ctx) return;
+
+        const chartCtx = ctx.getContext('2d');
+        const gradient = chartCtx.createLinearGradient(0, 0, 0, 260);
+        gradient.addColorStop(0, 'rgba(245, 158, 11, 0.30)');
+        gradient.addColorStop(1, 'rgba(7, 11, 20, 0.0)');
+
+        radShortChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'Short-Window Avg (3 readings, µSv/h)',
+                        data: [],
+                        borderColor: '#f59e0b',
+                        borderWidth: 2.2,
+                        backgroundColor: gradient,
+                        fill: true,
+                        tension: 0.35,
+                        pointRadius: 2,
+                        pointHoverRadius: 5,
+                        pointBackgroundColor: '#f59e0b'
+                    }
+                ]
+            },
+            options: getCommonOptions('Short-Window Avg (µSv/h)', 0, null)
+        });
+    }
+
+    /**
+     * Graph C: Long-Window Average (violet/purple)
+     */
+    function initRadLongChart() {
+        const ctx = document.getElementById('radiationLongChart');
+        if (!ctx) return;
+
+        const chartCtx = ctx.getContext('2d');
+        const gradient = chartCtx.createLinearGradient(0, 0, 0, 260);
+        gradient.addColorStop(0, 'rgba(168, 85, 247, 0.28)');
+        gradient.addColorStop(1, 'rgba(7, 11, 20, 0.0)');
+
+        radLongChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'Long-Window Avg (30 readings, µSv/h)',
+                        data: [],
+                        borderColor: '#a855f7',
+                        borderWidth: 2.2,
+                        backgroundColor: gradient,
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 1.5,
+                        pointHoverRadius: 4,
+                        pointBackgroundColor: '#a855f7'
+                    }
+                ]
+            },
+            options: getCommonOptions('Long-Window Avg (µSv/h)', 0, null)
+        });
+    }
+
+    /**
+     * Initialize Geomagnetic Flux Chart (unchanged)
+     */
+    function initMagneticChart() {
+        const ctx = document.getElementById('magneticChart');
+        if (!ctx) return;
+
+        const chartCtx = ctx.getContext('2d');
+        const gradient = chartCtx.createLinearGradient(0, 0, 0, 200);
+        gradient.addColorStop(0, 'rgba(168, 85, 247, 0.35)');
+        gradient.addColorStop(1, 'rgba(7, 11, 20, 0.0)');
+
+        magneticChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'Magnetic Field (µT)',
+                        data: [],
+                        borderColor: '#c084fc',
+                        borderWidth: 2,
+                        backgroundColor: gradient,
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 1.5,
+                        pointHoverRadius: 4,
+                        pointBackgroundColor: '#c084fc'
+                    }
+                ]
+            },
+            options: getCommonOptions('µT', null, null)
+        });
+    }
+
+    /**
+     * Initialize Power Bus Stability Chart — Dual-Axis Voltage & Current (unchanged)
+     */
+    function initPowerChart() {
+        const ctx = document.getElementById('powerChart');
+        if (!ctx) return;
+
+        powerChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'Bus Voltage (V)',
+                        yAxisID: 'yVoltage',
+                        data: [],
+                        borderColor: '#38bdf8',
+                        borderWidth: 1.8,
+                        fill: false,
+                        tension: 0.25,
+                        pointRadius: 1.5
+                    },
+                    {
+                        label: 'Current Draw (A)',
+                        yAxisID: 'yCurrent',
+                        data: [],
+                        borderColor: '#f59e0b',
+                        borderWidth: 1.8,
+                        fill: false,
+                        tension: 0.25,
+                        pointRadius: 1.5
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: { duration: 300 },
+                interaction: { mode: 'index', intersect: false },
+                plugins: {
+                    legend: {
+                        display: true,
+                        labels: {
+                            color: '#94a3b8',
+                            font: { family: "'JetBrains Mono', monospace", size: 10 }
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                        titleColor: '#38bdf8',
+                        bodyColor: '#f8fafc',
+                        borderColor: '#334155',
+                        borderWidth: 1
+                    }
+                },
+                scales: {
+                    x: {
+                        grid: { color: 'rgba(30, 41, 59, 0.6)' },
+                        ticks: { color: '#64748b', font: { family: "'JetBrains Mono', monospace", size: 9 }, maxTicksLimit: 6 }
+                    },
+                    yVoltage: {
+                        type: 'linear',
+                        position: 'left',
+                        title: { display: true, text: 'Voltage (V)', color: '#38bdf8' },
+                        grid: { color: 'rgba(30, 41, 59, 0.4)' },
+                        ticks: { color: '#38bdf8', font: { family: "'JetBrains Mono', monospace", size: 9 } }
+                    },
+                    yCurrent: {
+                        type: 'linear',
+                        position: 'right',
+                        title: { display: true, text: 'Current (A)', color: '#f59e0b' },
+                        grid: { drawOnChartArea: false },
+                        ticks: { color: '#f59e0b', font: { family: "'JetBrains Mono', monospace", size: 9 } }
+                    }
+                }
+            }
+        });
+    }
+
+    /**
+     * Render magnetic & power charts from storedHistory
+     */
+    function renderFromHistory() {
+        if (!magneticChart || !powerChart) return;
+
+        const slice = storedHistory.slice(-activeLimit);
+        const labels   = slice.map(r => formatTimeLabel(r.timestamp));
+        const magData  = slice.map(r => r.magnetic);
+        const voltData = slice.map(r => r.voltage);
+        const currData = slice.map(r => r.current);
+
+        magneticChart.data.labels = labels;
+        magneticChart.data.datasets[0].data = magData;
+        magneticChart.update('none');
+
+        powerChart.data.labels = labels;
+        powerChart.data.datasets[0].data = voltData;
+        powerChart.data.datasets[1].data = currData;
+        powerChart.update('none');
+    }
+
+    /**
+     * Render all three radiation charts from radHistory
+     */
+    function renderRadiationCharts() {
+        const slice = radHistory.slice(-activeLimit);
+        if (slice.length === 0) return;
+
+        const labels    = slice.map(r => formatTimeLabel(r.timestamp));
+        const adcData   = slice.map(r => r.raw_adc);
+        const shortData = slice.map(r => r.short_mean);
+        const longData  = slice.map(r => r.long_mean);
+
+        // Threshold lines for Graph A
+        const warnLine = slice.map(() => 0.50);
+        const critLine = slice.map(() => 2.50);
+
+        if (radAdcChart) {
+            radAdcChart.data.labels = labels;
+            radAdcChart.data.datasets[0].data = adcData;
+            radAdcChart.data.datasets[1].data = warnLine;
+            radAdcChart.data.datasets[2].data = critLine;
+            radAdcChart.update('none');
+        }
+
+        if (radShortChart) {
+            radShortChart.data.labels = labels;
+            radShortChart.data.datasets[0].data = shortData;
+            radShortChart.update('none');
+        }
+
+        if (radLongChart) {
+            radLongChart.data.labels = labels;
+            radLongChart.data.datasets[0].data = longData;
+            radLongChart.update('none');
+        }
+    }
+
+    return {
+        /**
+         * Initialize all Chart.js instances
+         */
+        init() {
+            initRadAdcChart();
+            initRadShortChart();
+            initRadLongChart();
+            initMagneticChart();
+            initPowerChart();
+        },
+
+        /**
+         * Load radiation analysis history from /api/readings/analysis
+         * Each item: { timestamp, raw_adc, short_mean, long_mean }
+         */
+        loadRadiationHistory(readings) {
+            if (!Array.isArray(readings)) return;
+            // Replace entire radHistory — the engine already provides computed averages
+            radHistory = readings.filter(r => r && r.timestamp);
+            // Bound to last 1000
+            if (radHistory.length > 1000) {
+                radHistory = radHistory.slice(-1000);
+            }
+            renderRadiationCharts();
+        },
+
+        /**
+         * Ingest historical batch for magnetic & power charts from /api/readings/history
+         */
+        loadHistory(readings) {
+            if (!Array.isArray(readings)) return;
+            readings.forEach(r => {
+                if (r && r.timestamp && !seenTimestamps.has(r.timestamp)) {
+                    seenTimestamps.add(r.timestamp);
+                    storedHistory.push(r);
+                }
+            });
+            if (storedHistory.length > 1000) {
+                const removed = storedHistory.splice(0, storedHistory.length - 1000);
+                removed.forEach(rm => seenTimestamps.delete(rm.timestamp));
+            }
+            renderFromHistory();
+        },
+
+        /**
+         * Add a new single live telemetry sample (magnetic & power only)
+         * Radiation is handled via loadRadiationHistory from the analysis endpoint
+         */
+        addReading(reading) {
+            if (!reading || !reading.timestamp) return;
+            if (seenTimestamps.has(reading.timestamp)) return;
+            seenTimestamps.add(reading.timestamp);
+            storedHistory.push(reading);
+            if (storedHistory.length > 1000) {
+                const rm = storedHistory.shift();
+                seenTimestamps.delete(rm.timestamp);
+            }
+            renderFromHistory();
+        },
+
+        /**
+         * Set visible data point range limit
+         */
+        setActiveRange(limit) {
+            activeLimit = parseInt(limit, 10) || 20;
+            renderFromHistory();
+            renderRadiationCharts();
+        }
+    };
+})();
+
+// Attach to window
+window.MonitorCharts = MonitorCharts;
